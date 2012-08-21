@@ -29,6 +29,7 @@ def get_pillar(opts, grains, id_, env=None):
     Return the correct pillar driver based on the file_client option
     '''
     try:
+        log.info("SSS get_pillar: with opts:".format(opts['file_client']))
         return {
                 'remote': RemotePillar,
                 'local': Pillar
@@ -36,6 +37,30 @@ def get_pillar(opts, grains, id_, env=None):
     except KeyError:
         return Pillar(opts, grains, id_, env)
 
+def _merge(dst, src):
+    stack = [(dst, src)]
+    log.debug("XXX <<<<<< {0}".format(src))
+    log.debug("XXX ====== {0}".format(dst))
+    while stack:
+        current_dst, current_src = stack.pop()
+        for key in current_src:
+            if key not in current_dst:
+                log.debug("XXX merging direct {0}".format(key))
+                current_dst[key] = current_src[key]
+            else:
+                if isinstance(current_src[key], dict) and isinstance(current_dst[key], dict) :
+                    log.debug("XXX merging HASH {0} {1} >>> {2}".format(key, current_src[key], current_dst[key]))
+                    stack.append((current_dst[key], current_src[key]))
+                elif isinstance(current_src[key], list) and isinstance(current_dst[key], list) :
+                    log.debug("XXX merging LIST {0} {1} >>> {2}".format(key, current_src[key], current_dst[key]))
+                    current_dst[key] = list(set(current_dst[key] + current_src[key]))
+                else:
+                    log.debug("XXX merging SCALAR {0} {1} >>> {2}".format(key,
+                        current_src[key], current_dst[key]))
+                    current_dst[key] = current_src[key]
+
+    log.debug("XXX >>>>>>> {0}".format(dst))
+    return dst
 
 class RemotePillar(object):
     '''
@@ -68,6 +93,7 @@ class Pillar(object):
     '''
     Read over the pillar top files and render the pillar data
     '''
+
     def __init__(self, opts, grains, id_, env):
         # use the local file client
         self.opts = self.__gen_opts(opts, grains, id_, env)
@@ -76,6 +102,7 @@ class Pillar(object):
         self.functions = salt.loader.minion_mods(self.opts)
         self.rend = salt.loader.render(self.opts, self.functions)
         self.ext_pillars = salt.loader.pillars(self.opts, self.functions)
+                            
 
     def __gen_opts(self, opts, grains, id_, env=None):
         '''
@@ -85,6 +112,7 @@ class Pillar(object):
         opts['file_roots'] = opts['pillar_roots']
         opts['file_client'] = 'local'
         opts['grains'] = grains
+        opts['pillar'] = {}
         opts['id'] = id_
         if 'environment' not in opts:
             opts['environment'] = env
@@ -146,17 +174,22 @@ class Pillar(object):
                         .format(exc)))
 
         # Search initial top files for includes
+        log.info("XXX get_opts... {0}".format(tops.items()))
         for env, ctops in tops.items():
             for ctop in ctops:
                 if not 'include' in ctop:
                     continue
                 for sls in ctop['include']:
+
+                    log.info("XXX processing include {0}".format(sls))
+
                     include[env].append(sls)
                 ctop.pop('include')
         # Go through the includes and pull out the extra tops and add them
         while include:
             pops = []
             for env, states in include.items():
+                log.info("XXX looping {0} {1}".format(env, states))
                 pops.append(env)
                 if not states:
                     continue
@@ -209,6 +242,7 @@ class Pillar(object):
                                 states.add(comp)
                         top[env][tgt] = matches
                         top[env][tgt].extend(list(states))
+        log.info("XXX merged_tops into {0}".format(top))
         return top
 
     def get_top(self):
@@ -247,22 +281,36 @@ class Pillar(object):
     def render_pstate(self, sls, env, mods):
         '''
         Collect a single pillar sls file and render it
+
+        NEW: supports resolving the include chain before recompiling the main
+        sls therefore supporting recursive resolution of pillar keys.
         '''
         err = ''
         errors = []
+
+        log.info("XXX rendering {0} {1} {2}".format(sls, env, mods))
         fn_ = self.client.get_state(sls, env)
         if not fn_:
             errors.append(('Specified SLS {0} in environment {1} is not'
                            ' available on the salt master').format(sls, env))
         state = None
         try:
+            log.info("ZZZ <<< render {0}".format(fn_))
             state = compile_template(
                 fn_, self.rend, self.opts['renderer'], env, sls)
+            log.info("ZZZ >>> state {0}".format(state))
+            #if state:
+            #    self.pillar.update(state)
+            # XXX can we detect here if any pillar[tokens] were undefined?
+            # XXX Yes! state = {'var_in_testkey': None, 'include': ['included_file']}
+            # XXX So set recompile_flag=1
         except Exception as exc:
             errors.append(('Rendering SLS {0} failed, render error:\n{1}'
                            .format(sls, exc)))
+        log.info("XXX rendering loop....mods {0}".format(mods))
         mods.add(sls)
         nstate = None
+        has_includes = 0 
         if state:
             if not isinstance(state, dict):
                 errors.append(('SLS {0} does not render to a dictionary'
@@ -274,17 +322,35 @@ class Pillar(object):
                                'as a list'.format(sls))
                         errors.append(err)
                     else:
+                        has_includes = has_includes + 1
+
                         for sub_sls in state.pop('include'):
+                            log.info("XXX INCLUDE {0}".format(sub_sls))
                             if sub_sls not in mods:
+                                log.info("XXX YES")
                                 nstate, mods, err = self.render_pstate(
                                         sub_sls,
                                         env,
                                         mods
                                         )
-                            if nstate:
-                                state.update(nstate)
+                            else:
+                                log.info("XXX NO")
+                                
                             if err:
                                 errors += err
+        if has_includes:
+            try:
+                log.info("ZZZ <<< render_again {0}".format(fn_))
+                state = compile_template(
+                    fn_, self.rend, self.opts['renderer'], env, sls)
+                log.info("ZZZ >>> state {0}".format(state))
+            except Exception as exc:
+                errors.append(('Rendering SLS {0} failed, render error:\n{1}'
+                               .format(sls, exc)))
+        if state:
+            _merge(self.opts['pillar'], state)
+
+        log.info("XXX render_pstate finish: {0}".format(self.opts['pillar']))
         return state, mods, errors
 
     def render_pillar(self, matches):
@@ -292,17 +358,21 @@ class Pillar(object):
         Extract the sls pillar files from the matches and render them into the
         pillar
         '''
-        pillar = {}
         errors = []
         for env, pstates in matches.items():
             mods = set()
             for sls in pstates:
+                log.debug("XXX rendering_pstate {0} {1} {2}".format(sls, env, mods))
                 pstate, mods, err = self.render_pstate(sls, env, mods)
-                if pstate:
-                    pillar.update(pstate)
+                #if pstate:
+                #    pillar.update(pstate)
                 if err:
                     errors += err
-        return pillar, errors
+        log.debug("XXX rendering_pillar returns {0} {1}".format(self.opts['pillar'], errors))
+        if "__private" in self.opts['pillar']:
+            del(self.opts['pillar']['__private'])
+
+        return self.opts['pillar'], errors
 
     def ext_pillar(self):
         '''
@@ -339,13 +409,18 @@ class Pillar(object):
         '''
         Render the pillar dta and return
         '''
+        __pillar__ = { "else": "test1" }
         top, terrors = self.get_top()
+        log.info("XXX compiling pillar {0}".format(top))
         matches = self.top_matches(top)
+        log.info("XXX rendering pillar {0}".format(matches))
         pillar, errors = self.render_pillar(matches)
+        log.info("XXX pillar update {0}".format(self.ext_pillar()))
         pillar.update(self.ext_pillar())
         errors.extend(terrors)
         if errors:
             for error in errors:
                 log.critical('Pillar render error: {0}'.format(error))
             return {}
+        log.info("XXX pillar returned {0}".format(pillar))
         return pillar
