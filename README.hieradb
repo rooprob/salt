@@ -1,0 +1,85 @@
+Hieradb Patch 52bf4c185
+=======================
+
+Represent hieradb inside pillar.
+
+/etc/salt/master:
+....
+pillar_roots:
+   base:
+     - /salt-test/srv/pillar
+
+pillar_hieradb_private_keys:
+  - "__private"
+
+pillar_hieradb:
+  - "%{location}.%{sls}"
+  - "%{sls}"
+
+/salt-test/srv/pillar/top.sls
+base:
+  '*':
+   - simple_include
+   - dynamic_include
+
+/salt-test/srv/pillar/simple_include.sls
+include:
+  - include
+
+/salt-test/srv/pillar/dynamic_include.sls
+include:
+  - include2
+
+use_var: {{ pillar['something'] }}
+use_var_else: {{ pillar['something_else'] }}
+
+... the pillar references are covered as the data is configured and merged into
+pillar dict from the depth-first 'include' processing....
+
+/salt-test/srv/pillar/include.sls
+something: simple
+
+/salt-test/srv/pillar/include2.sls
+something_else: harder
+
+# salt '*' pillar.data 
+{'lab-etp-generic1d.engr.domain.com': {'something': 'simple',
+                                       'something_else': 'harder',
+                                       'use_var': 'simple',
+                                       'use_var_else': 'harder'}}
+
+
+... next, take advantage of some specific overrides to use an arbitary grain,
+in this case 'localtion' ....
+
+# salt '*' grains.item location
+lab-etp-generic1d.engr.domain.com: lab
+
+... add the override, the pillar_hieradb array is expanded each request with
+grains matching the simple tokens ...
+
+/salt-test/srv/pillar/lab/include2.sls
+something_else: special_lab_config
+
+... next run, we get the new settings, but only for machines in 'lab'...
+
+# salt '*' pillar.data 
+'lab-etp-generic1d.engr.domain.com': {'something': 'simple',
+                                      'something_else': 'special_lab_config',
+                                      'use_var': 'simple',
+                                      'use_var_else': 'special_lab_config'}}
+
+So things get interesting when it comes to dynamically handling %{env} where we
+forgo adding separate envs in top.sls and just leave it as base, and use
+pillar_hieradb to dynamically support envs, or any other grain.
+
+Using pillar_hieradb_private_keys:
+
+We use a combination of static tables of profiles, components and resources in
+hiera, with enablers in role tables associated with hosts. We can use the above
+system to stash vars for later pillar template processing. So we don't send all
+this additional data to the hosts, we put it all in a private key
+('__private'). We can configure "pillar_hieradb_private_keys" to simply trim
+this data out of the output, therefore avoiding any data leakage post pillar
+sls template processing.
+
