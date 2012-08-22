@@ -4,6 +4,7 @@ Render the pillar data
 
 # Import python libs
 import os
+import re
 import copy
 import collections
 import logging
@@ -38,6 +39,14 @@ def get_pillar(opts, grains, id_, env=None):
         return Pillar(opts, grains, id_, env)
 
 def _merge(dst, src):
+    '''
+    Perform an datastructure merge of pillar as new pillar data is found.
+    New data overwrites old data.
+
+    XXX Improve by signalling to client when datastructures are incompatible.
+    Right now the new data structure quietly wins. Checking structure is left
+    to the pillar template code.
+    '''
     stack = [(dst, src)]
     log.debug("XXX <<<<<< {0}".format(src))
     log.debug("XXX ====== {0}".format(dst))
@@ -102,7 +111,8 @@ class Pillar(object):
         self.functions = salt.loader.minion_mods(self.opts)
         self.rend = salt.loader.render(self.opts, self.functions)
         self.ext_pillars = salt.loader.pillars(self.opts, self.functions)
-                            
+        self.pillar_hieradb()
+        log.info("XXX pillar_hieradb {0}".format(self.pillar_hieradb))
 
     def __gen_opts(self, opts, grains, id_, env=None):
         '''
@@ -242,7 +252,7 @@ class Pillar(object):
                                 states.add(comp)
                         top[env][tgt] = matches
                         top[env][tgt].extend(list(states))
-        log.info("XXX merged_tops into {0}".format(top))
+        log.debug("XXX merged_tops into {0}".format(top))
         return top
 
     def get_top(self):
@@ -288,75 +298,100 @@ class Pillar(object):
         '''
         Collect a single pillar sls file and render it
 
-        NEW: supports resolving the include chain before recompiling the main
-        sls therefore supporting recursive resolution of pillar keys.
+        NEW: Perform a depth-first resolution of include-ed pillar files.  As
+        includes are processed, pillar dict() is built up on the fly, allowing
+        for subsequent pillar dict() references in pillar_sls. Order of include
+        processing is depth first, therefore defining the scoping rules.
+        A side-effect is that to discover any include's the sls is compiled
+        twice: incase there are any pillar dict refs to be defined.
+
+        NEW: Perform a hierachical resolution of all sls files.
+        Pass to client.get_state() a modified sls path, based on hieradb
+        configured (see pillar_hieradb()). A depth first resolutoin is processed
+        following a most-specific-path higher-precedence model.
+
         '''
         err = ''
         errors = []
 
-        log.info("XXX rendering {0} {1} {2}".format(sls, env, mods))
-        fn_ = self.client.get_state(sls, env)
-        if not fn_:
-            errors.append(('Specified SLS {0} in environment {1} is not'
-                           ' available on the salt master').format(sls, env))
-        state = None
-        try:
-            log.info("ZZZ <<< render {0}".format(fn_))
-            state = compile_template(
-                fn_, self.rend, self.opts['renderer'], env, sls)
-            log.info("ZZZ >>> state {0}".format(state))
-            #if state:
-            #    self.pillar.update(state)
-            # XXX can we detect here if any pillar[tokens] were undefined?
-            # XXX Yes! state = {'var_in_testkey': None, 'include': ['included_file']}
-            # XXX So set recompile_flag=1
-        except Exception as exc:
-            errors.append(('Rendering SLS {0} failed, render error:\n{1}'
-                           .format(sls, exc)))
-        log.info("XXX rendering loop....mods {0}".format(mods))
-        mods.add(sls)
-        nstate = None
-        has_includes = 0 
-        if state:
-            if not isinstance(state, dict):
-                errors.append(('SLS {0} does not render to a dictionary'
-                               .format(sls)))
-            else:
-                if 'include' in state:
-                    if not isinstance(state['include'], list):
-                        err = ('Include Declaration in SLS {0} is not formed '
-                               'as a list'.format(sls))
-                        errors.append(err)
-                    else:
-                        has_includes = has_includes + 1
+        original_sls = sls
+        hieradb_paths = []
+        for path in self.pillar_hieradb:
+            path = re.sub(r'%{sls}', sls, path)
+            hieradb_paths.append(path)
 
-                        for sub_sls in state.pop('include'):
-                            log.info("XXX INCLUDE {0}".format(sub_sls))
-                            if sub_sls not in mods:
-                                log.info("XXX YES")
-                                nstate, mods, err = self.render_pstate(
-                                        sub_sls,
-                                        env,
-                                        mods
-                                        )
-                            else:
-                                log.info("XXX NO")
-                                
-                            if err:
-                                errors += err
-        if has_includes:
+        log.info("XXX sls: {0} hieradb: {1}".format(sls, hieradb_paths))
+
+        total_paths = len(hieradb_paths)
+        found_paths = 0
+        state = None
+        while hieradb_paths:
+            # pop(): bottom up, where later settings are merged over earlier
+            sls = hieradb_paths.pop()
+            fn_ = self.client.get_state(sls, env)
+
+            if not fn_:
+                continue
+
+            recompile_flag=False
+            found_paths = found_paths + 1
             try:
-                log.info("ZZZ <<< render_again {0}".format(fn_))
+                log.info("ZZZ <<< compile: {0}".format(fn_))
                 state = compile_template(
                     fn_, self.rend, self.opts['renderer'], env, sls)
-                log.info("ZZZ >>> state {0}".format(state))
+                log.debug("ZZZ >>> state: {0}".format(state))
+                if state:
+                    # Detect here if any pillar[tokens] were None?
+                    for key,var in state.items():
+                        if var is None:
+                            recompile_flag=True
+                            break
             except Exception as exc:
                 errors.append(('Rendering SLS {0} failed, render error:\n{1}'
                                .format(sls, exc)))
-        if state:
-            _merge(self.opts['pillar'], state)
+            mods.add(sls)
+            nstate = None
+            if state:
+                if not isinstance(state, dict):
+                    errors.append(('SLS {0} does not render to a dictionary'
+                                   .format(sls)))
+                else:
+                    if 'include' in state:
+                        if not isinstance(state['include'], list):
+                            err = ('Include Declaration in SLS {0} is not formed '
+                                   'as a list'.format(sls))
+                            errors.append(err)
+                        else:
+                            for sub_sls in state.pop('include'):
+                                if sub_sls not in mods:
+                                    log.info("rendering: {0}".format(sub_sls))
+                                    nstate, mods, err = self.render_pstate(
+                                            sub_sls,
+                                            env,
+                                            mods
+                                            )
+                                else:
+                                    log.info("seen: {0}".format(sub_sls))
 
-        log.info("XXX render_pstate finish: {0}".format(self.opts['pillar']))
+                                if err:
+                                    errors += err
+            if recompile_flag:
+                try:
+                    log.info("ZZZ <<< recompile: {0}".format(fn_))
+                    state = compile_template(
+                        fn_, self.rend, self.opts['renderer'], env, sls)
+                    log.debug("ZZZ >>> state: {0}".format(state))
+                except Exception as exc:
+                    errors.append(('Rendering SLS {0} failed, render error:\n{1}'
+                                   .format(sls, exc)))
+            if state:
+                _merge(self.opts['pillar'], state)
+
+        if found_paths == 0:
+            errors.append(('Specified SLS {0} in environment {1} is not'
+                           ' available on the salt master').format(original_sls,
+                                                                   env))
+        log.debug("XXX render_pstate finish: {0}".format(self.opts['pillar']))
         return state, mods, errors
 
     def render_pillar(self, matches):
@@ -375,10 +410,55 @@ class Pillar(object):
                 if err:
                     errors += err
         log.debug("XXX rendering_pillar returns {0} {1}".format(self.opts['pillar'], errors))
-        if "__private" in self.opts['pillar']:
-            del(self.opts['pillar']['__private'])
+
+        # clean up private keys
+        for private in self.pillar_hieradb_private_keys:
+            if private in self.opts['pillar']:
+                del(self.opts['pillar'][private])
 
         return self.opts['pillar'], errors
+
+    def pillar_hieradb(self):
+        '''
+        Parse the 'pillar_hieradb' token from salt/master config.
+
+        This configures a hierarchical data lookup for each minion, based on
+        grains from on the minon system. The pillar sls files will be resolved
+        in render_pstate() by the specified hierarchy and merged by _merge()
+        function (see above).
+
+        List of hieradb resolution paths, supporting grain substitution.
+
+        pillar_hieradb:
+          - %{grain1}.%{grain2}.%{sls}
+          - %{grain1}.%{sls}
+          - %{sls}
+
+        '''
+
+        self.pillar_hieradb = []
+        if not "pillar_hieradb" in self.opts:
+            return []
+        if not isinstance(self.opts['pillar_hieradb'], list):
+            log.critical('The "pillar_hieradb" option is malformed')
+            return []
+        for path in self.opts['pillar_hieradb']:
+            # sub tokens for grains
+            # stash lookup path
+            for key, val in self.opts['grains'].items():
+                if isinstance(val, string_types):
+                    path = re.sub(r'%{' + key + '}', val, path)
+            self.pillar_hieradb.append(path)
+
+        # Configurable key list to be clipped from output to minion
+        self.pillar_hieradb_private_keys = []
+        if not "pillar_hieradb_private_keys" in self.opts:
+            return []
+        if not isinstance(self.opts['pillar_hieradb_private_keys'], list):
+            log.critical('The "pillar_hieradb_private_keys" option is malformed')
+            return []
+        for path in self.opts['pillar_hieradb_private_keys']:
+            self.pillar_hieradb_private_keys.append(path)
 
     def ext_pillar(self):
         '''
@@ -417,16 +497,15 @@ class Pillar(object):
         '''
         __pillar__ = { "else": "test1" }
         top, terrors = self.get_top()
-        log.info("XXX compiling pillar {0}".format(top))
         matches = self.top_matches(top)
-        log.info("XXX rendering pillar {0}".format(matches))
+        # perform new recursive, hieradb strategy
         pillar, errors = self.render_pillar(matches)
-        log.info("XXX pillar update {0}".format(self.ext_pillar()))
-        pillar.update(self.ext_pillar())
+        # merge in any ext_pillar
+        _merge(pillar, self.ext_pillar())
         errors.extend(terrors)
         if errors:
             for error in errors:
                 log.critical('Pillar render error: {0}'.format(error))
             return {}
-        log.info("XXX pillar returned {0}".format(pillar))
+        log.debug("XXX pillar returned {0}".format(pillar))
         return pillar
