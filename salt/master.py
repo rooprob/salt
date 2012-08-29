@@ -121,6 +121,11 @@ class SMaster(object):
             keyfile = os.path.join(
                     self.opts['cachedir'], '.{0}_key'.format(user)
                     )
+
+            if os.path.exists(keyfile):
+                log.debug('Removing stale keyfile: {0}'.format(keyfile))
+                os.unlink(keyfile)
+
             key = salt.crypt.Crypticle.generate_key_string()
             with open(keyfile, 'w+') as fp_:
                 fp_.write(key)
@@ -278,6 +283,24 @@ class Publisher(multiprocessing.Process):
                     if exc.errno == errno.EINTR:
                         continue
                     raise exc
+                if self.opts['pub_refresh']:
+                    pub_sock.close()
+                    #time.sleep(0.5)
+                    pub_sock = context.socket(zmq.PUB)
+                    try:
+                        pub_sock.setsockopt(zmq.HWM, 1)
+                    except AttributeError:
+                        pub_sock.setsockopt(zmq.SNDHWM, 1)
+                        pub_sock.setsockopt(zmq.RCVHWM, 1)
+                    con = False
+                    while not con:
+                        time.sleep(0.1)
+                        try:
+                            pub_sock.bind(pub_uri)
+                            con = True
+                        except zmq.ZMQError:
+                            pass
+                
         except KeyboardInterrupt:
             pub_sock.close()
             pull_sock.close()

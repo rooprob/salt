@@ -66,7 +66,7 @@ takes a few arguments:
 Recursive directory management can also be set via the ``recurse``
 function. Recursive directory management allows for a directory on the salt
 master to be recursively copied down to the minion. This is a great tool for
-deploying large code and configuration systems. A recuse state would look
+deploying large code and configuration systems. A recurse state would look
 something like this:
 
 .. code-block:: yaml
@@ -232,6 +232,8 @@ def _clean_dir(root, keep):
     real_keep.add(root)
     if isinstance(keep, list):
         for fn_ in keep:
+            if not os.path.isabs(fn_):
+                continue
             real_keep.add(fn_)
             while True:
                 fn_ = os.path.dirname(fn_)
@@ -454,7 +456,7 @@ def _check_perms(name, ret, user, group, mode):
                         )
             except OSError, e:
                 ret['result'] = False
-                
+
     if user:
         if user != __salt__['file.get_user'](name):
             ret['result'] = False
@@ -585,9 +587,14 @@ def _check_directory(
         if not 'group' in recurse:
             group = None
         for root, dirs, files in os.walk(name):
-            for name in files:
-                path = os.path.join(root, name)
-                fchange = _check_dir_meta(path, user, group, None)
+            for fname in files:
+                fchange = {}
+                path = os.path.join(root, fname)
+                stats = __salt__['file.stats'](path, 'md5')
+                if not user is None and user != stats['user']:
+                    fchange['user'] = user
+                if not group is None and group != stats['group']:
+                    fchange['group'] = group
                 if fchange:
                     changes[path] = fchange
             for name in dirs:
@@ -595,16 +602,13 @@ def _check_directory(
                 fchange = _check_dir_meta(path, user, group, None)
                 if fchange:
                     changes[path] = fchange
-    else:
-        if not os.path.isdir(name):
-            changes[name] = 'new'
-            return None, 'A new directory is set to be made at {0}'.format(
-                    name)
+    if not os.path.isdir(name):
+        changes[name] = {'directory': 'new'}
     if changes:
         comment = 'The following files will be changed:\n'
         for fn_ in changes:
             for key, val in changes[fn_].items():
-                comment += '{0}: {1} - {2}'.format(fn_, key, val)
+                comment += '{0}: {1} - {2}\n'.format(fn_, key, val)
         return None, comment
     return True, 'The directory {0} is in the correct state'.format(name)
 
@@ -1429,7 +1433,7 @@ def recurse(name,
                 include_empty)
         return ret
 
-    def update_changes_by_perms(path, mode, changetype='updated'): 
+    def update_changes_by_perms(path, mode, changetype='updated'):
         _ret = {'name': name,
                 'changes': {},
                 'result': True,
@@ -1440,7 +1444,7 @@ def recurse(name,
         if _ret['comment']:
             comments = ret['comment'].setdefault(path, [])
             comments.extend(_ret['comment'])
-        if _ret['changes']: 
+        if _ret['changes']:
             ret['changes'][path] = changetype
 
     vdir = set()
@@ -1576,6 +1580,27 @@ def sed(name, before, after, limit='', backup='.bak', options='-r -e',
 
 def comment(name, regex, char='#', backup='.bak'):
     '''
+    Comment out specified lines in a file.
+
+    path
+        The full path to the file to be edited
+    regex
+        A regular expression used to find the lines that are to be commented;
+        this pattern will be wrapped in parenthesis and will move any
+        preceding/trailing ``^`` or ``$`` characters outside the parenthesis
+        (e.g., the pattern ``^foo$`` will be rewritten as ``^(foo)$``)
+    char : ``#``
+        The character to be inserted at the beginning of a line in order to
+        comment it out
+    backup : ``.bak``
+        The file will be backed up before edit with this file extension
+
+        .. warning::
+
+            This backup will be overwritten each time ``sed`` / ``comment`` /
+            ``uncomment`` is called. Meaning the backup will only be useful
+            after the first invocation.
+
     Usage::
 
         /etc/fstab:
@@ -1623,6 +1648,23 @@ def comment(name, regex, char='#', backup='.bak'):
 
 def uncomment(name, regex, char='#', backup='.bak'):
     '''
+    Uncomment specified commented lines in a file
+
+    path
+        The full path to the file to be edited
+    regex
+        A regular expression used to find the lines that are to be uncommented.
+        This regex should not include the comment character. A leading ``^``
+        character will be stripped for convenience (for easily switching
+        between comment() and uncomment()).
+    char : ``#``
+        The character to remove in order to uncomment a line; if a single
+        whitespace character follows the comment it will also be removed
+    backup : ``.bak``
+        The file will be backed up before edit with this file extension;
+        **WARNING:** each time ``sed``/``comment``/``uncomment`` is called will
+        overwrite this backup
+
     Usage::
 
         /etc/adduser.conf:
@@ -1670,7 +1712,7 @@ def uncomment(name, regex, char='#', backup='.bak'):
     return ret
 
 
-def append(name, text):
+def append(name, text, makedirs=False):
     '''
     Ensure that some text appears at the end of a file
 
@@ -1698,6 +1740,19 @@ def append(name, text):
     '''
     ret = {'name': name, 'changes': {}, 'result': False, 'comment': ''}
 
+    if makedirs:
+        dirname = os.path.dirname(name)
+        if not __salt__['file.directory_exists'](dirname):
+            _makedirs(name)
+            check_res, check_msg = _check_directory(
+                dirname, None, None, False, None, False, False
+            )
+            if not check_res:
+                return _error(ret, check_msg)
+
+        # Make sure that we have a file
+        __salt__['file.touch'](name)
+
     check_res, check_msg = _check_file(name)
     if not check_res:
         return _error(ret, check_msg)
@@ -1706,6 +1761,11 @@ def append(name, text):
         text = (text,)
 
     for chunk in text:
+
+        if __salt__['file.contains_regex'](
+                        name, salt.utils.build_whitepace_splited_regex(chunk)):
+            continue
+
         try:
             lines = chunk.split('\n')
         except AttributeError:
@@ -1714,17 +1774,13 @@ def append(name, text):
             return _error(ret, 'Given text is not a string')
 
         for line in lines:
-            if __salt__['file.contains'](name, line):
-                continue
-            else:
-                if __opts__['test']:
-                    ret['comment'] = 'File {0} is set to be updated'.format(
-                            name)
-                    ret['result'] = None
-                    return ret
-                __salt__['file.append'](name, line)
-                cgs = ret['changes'].setdefault('new', [])
-                cgs.append(line)
+            if __opts__['test']:
+                ret['comment'] = 'File {0} is set to be updated'.format(name)
+                ret['result'] = None
+                return ret
+            __salt__['file.append'](name, line)
+            cgs = ret['changes'].setdefault('new', [])
+            cgs.append(line)
 
     count = len(ret['changes'].get('new', []))
 

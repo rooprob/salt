@@ -479,29 +479,45 @@ class Minion(object):
         # Prepare the minion event system
         #
         # Start with the publish socket
-        epub_sock = context.socket(zmq.PUB)
-        epub_uri = 'ipc://{0}'.format(
-                os.path.join(self.opts['sock_dir'], 'minion_event_pub.ipc')
+        epub_sock_path = os.path.join(
+                self.opts['sock_dir'],
+                'minion_event_{0}_pub.ipc'.format(self.opts['id'])
                 )
+        if os.path.exists(epub_sock_path):
+            err = 'Minion with the same id has been detected on this system'
+            log.critical(err)
+            sys.exit(4)
+        epull_sock_path = os.path.join(
+                self.opts['sock_dir'],
+                'minion_event_{0}_pull.ipc'.format(self.opts['id'])
+                )
+        epub_sock = context.socket(zmq.PUB)
+        if self.opts.get('ipc_mode', '') == 'tcp':
+            epub_uri = 'tcp://127.0.0.1:{0}'.format(
+                    self.opts['tcp_pub_port']
+                    )
+            epull_uri = 'tcp://127.0.0.1:{0}'.format(
+                    self.opts['tcp_pull_port']
+                    )
+        else:
+            epub_uri = 'ipc://{0}'.format(epub_sock_path)
+            epull_uri = 'ipc://{0}'.format(epull_sock_path)
+
         # Create the pull socket
         epull_sock = context.socket(zmq.PULL)
-        epull_uri = 'ipc://{0}'.format(
-                os.path.join(self.opts['sock_dir'], 'minion_event_pull.ipc')
-                )
         # Bind the event sockets
         epub_sock.bind(epub_uri)
         epull_sock.bind(epull_uri)
         # Restrict access to the sockets
-        os.chmod(
-                os.path.join(self.opts['sock_dir'],
-                    'minion_event_pub.ipc'),
-                448
-                )
-        os.chmod(
-                os.path.join(self.opts['sock_dir'],
-                    'minion_event_pull.ipc'),
-                448
-                )
+        if not self.opts.get('ipc_mode', '') == 'tcp':
+            os.chmod(
+                    epub_sock_path,
+                    448
+                    )
+            os.chmod(
+                    epull_sock_path,
+                    448
+                    )
 
         poller = zmq.Poller()
         epoller = zmq.Poller()

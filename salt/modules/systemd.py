@@ -1,8 +1,10 @@
 '''
 Provide the service module for systemd
 '''
-
+# Import Python libs
 import os
+# Import Salt libs
+import salt.utils
 
 
 def __virtual__():
@@ -16,6 +18,15 @@ def __virtual__():
     return False
 
 
+def _systemctl_cmd(action, name):
+    valid_suffixes = ['service','socket', 'device', 'mount', 'automount',
+                      'swap', 'target', 'path', 'timer']
+
+    if not any(name.endswith(valid_suffix) for valid_suffix in valid_suffixes):
+        name += '.service'
+    return 'systemctl {0} {1}'.format(action, name)
+
+
 def get_enabled():
     '''
     Return a list of all enabled services
@@ -26,8 +37,7 @@ def get_enabled():
     '''
     ret = []
     for serv in get_all():
-        cmd = 'systemctl is-enabled {0}.service'.format(serv)
-        if not __salt__['cmd.retcode'](cmd):
+        if not __salt__['cmd.retcode'](_systemctl_cmd('is-enabled', serv)):
             ret.append(serv)
     return sorted(ret)
 
@@ -42,8 +52,7 @@ def get_disabled():
     '''
     ret = []
     for serv in get_all():
-        cmd = 'systemctl is-enabled {0}.service'.format(serv)
-        if __salt__['cmd.retcode'](cmd):
+        if __salt__['cmd.retcode'](_systemctl_cmd('is-enabled', serv)):
             ret.append(serv)
     return sorted(ret)
 
@@ -57,12 +66,11 @@ def get_all():
         salt '*' service.get_all
     '''
     ret = set()
-    sdir = '/lib/systemd/system'
-    if not os.path.isdir('/lib/systemd/system'):
-        return []
-    for fn_ in os.listdir(sdir):
-        if fn_.endswith('.service'):
-            ret.add(fn_[:fn_.rindex('.')])
+    for sdir in ('/lib/systemd/system', '/etc/systemd/system'):
+        if os.path.isdir(sdir):
+            for fn_ in os.listdir(sdir):
+                if fn_.endswith('.service'):
+                    ret.add(fn_[:fn_.rindex('.')])
     return sorted(list(ret))
 
 
@@ -74,8 +82,7 @@ def start(name):
 
         salt '*' service.start <service name>
     '''
-    cmd = 'systemctl start {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('start', name))
 
 
 def stop(name):
@@ -86,8 +93,7 @@ def stop(name):
 
         salt '*' service.stop <service name>
     '''
-    cmd = 'systemctl stop {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('stop', name))
 
 
 def restart(name):
@@ -98,8 +104,9 @@ def restart(name):
 
         salt '*' service.restart <service name>
     '''
-    cmd = 'systemctl restart {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    if name == 'salt-minion':
+        salt.utils.daemonize_if(__opts__)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('restart', name))
 
 
 def reload(name):
@@ -110,8 +117,7 @@ def reload(name):
 
         salt '*' service.reload <service name>
     '''
-    cmd = 'systemctl reload {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('reload', name))
 
 
 # The unused sig argument is required to maintain consistency in the state
@@ -125,8 +131,7 @@ def status(name, sig=None):
 
         salt '*' service.status <service name>
     '''
-    cmd = 'systemctl show {0}.service'.format(name)
-    ret = __salt__['cmd.run'](cmd)
+    ret = __salt__['cmd.run'](_systemctl_cmd('show', name))
     index1 = ret.find('\nMainPID=')
     index2 = ret.find('\n', index1+9)
     mainpid = ret[index1+9:index2]
@@ -143,8 +148,7 @@ def enable(name):
 
         salt '*' service.enable <service name>
     '''
-    cmd = 'systemctl enable {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('enable', name))
 
 
 def disable(name):
@@ -155,8 +159,7 @@ def disable(name):
 
         salt '*' service.disable <service name>
     '''
-    cmd = 'systemctl disable {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('disable', name))
 
 
 def enabled(name):
@@ -167,8 +170,7 @@ def enabled(name):
 
         salt '*' service.enabled <service name>
     '''
-    cmd = 'systemctl is-enabled {0}.service'.format(name)
-    return not __salt__['cmd.retcode'](cmd)
+    return not __salt__['cmd.retcode'](_systemctl_cmd('is-enabled', name))
 
 
 def disabled(name):
@@ -179,5 +181,4 @@ def disabled(name):
 
         salt '*' service.disabled <service name>
     '''
-    cmd = 'systemctl is-enabled {0}.service'.format(name)
-    return bool(__salt__['cmd.retcode'](cmd))
+    return bool(__salt__['cmd.retcode'](_systemctl_cmd('is-enabled', name)))
