@@ -178,6 +178,22 @@ def _makedirs_perms(name, user=None, group=None, mode=0755):
     _check_perms(name, None, user, group, int("%o" % mode) if mode else None)
 
 
+def _check_user(user, group):
+    '''
+    Checks if the named user and group are present on the minion
+    '''
+    err = ''
+    if user:
+        uid = __salt__['file.user_to_uid'](user)
+        if uid == '':
+            err += 'User {0} is not available '.format(user)
+    if group:
+        gid = __salt__['file.group_to_gid'](group)
+        if gid == '':
+            err += 'Group {0} is not available'.format(group)
+    return err
+
+
 def _is_bin(path):
     '''
     Return True if a file is a bin, just checks for NULL char, this should be
@@ -270,6 +286,7 @@ def _source_list(source, source_hash, env):
     if isinstance(source, list):
         # get the master file list
         mfiles = __salt__['cp.list_master'](env)
+        mdirs = __salt__['cp.list_master_dirs'](env)
         for single in source:
             if isinstance(single, dict):
                 # check the proto, if it is http or ftp then download the file
@@ -293,7 +310,7 @@ def _source_list(source, source_hash, env):
                         source_hash = single_hash
                         break
             elif isinstance(single, string_types):
-                if single in mfiles:
+                if single[7:] in mfiles or single[7:] in mdirs:
                     source = single
                     break
     return source, source_hash
@@ -423,7 +440,7 @@ def _check_perms(name, ret, user, group, mode):
     perms = {}
     perms['luser'] = __salt__['file.get_user'](name)
     perms['lgroup'] = __salt__['file.get_group'](name)
-    perms['lmode'] = __salt__['file.get_mode'](name).lstrip('0')
+    perms['lmode'] = str(__salt__['file.get_mode'](name)).lstrip('0')
 
     # Mode changes if needed
     if mode:
@@ -454,7 +471,7 @@ def _check_perms(name, ret, user, group, mode):
                         user,
                         group
                         )
-            except OSError, e:
+            except OSError:
                 ret['result'] = False
 
     if user:
@@ -489,14 +506,13 @@ def _get_recurse_dest(prefix, fn_, source, env):
         local_roots.sort(key=lambda p: len(p), reverse=True)
 
     srcpath = source[7:] # the path after "salt://"
-    pathsep = os.path.sep
 
     # in solo mode(ie, file_client=='local'), fn_ is a path below
     # a file root; in remote mode, fn_ is a path below the cache_dir.
     for root in local_roots:
         n = len(root)
         # if root is the longest prefix path of fn_
-        if root == fn_[:n] and fn_[n] == pathsep:
+        if root == fn_[:n]:
             cachedir = os.path.join(root, srcpath)
             break
     else:
@@ -713,7 +729,7 @@ def _check_file_meta(
                     slines = src.readlines()
                     nlines = name_.readlines()
                 changes['diff'] = (
-                        ''.join(difflib.unified_diff(nlines, slines))
+                        ''.join(difflib.unified_diff(slines, nlines))
                         )
             else:
                 changes['sum'] = 'Checksum differs'
@@ -884,6 +900,26 @@ def absent(name):
     return ret
 
 
+def exists(name):
+    '''
+    Verify that the named file or directory is present or exists. 
+    Ensures pre-requisites outside of salts per-vue have been previously
+    satisified (aka, keytabs, private keys, etc.) before deployment
+
+    name
+        Absolute path which must exist
+    '''
+    ret = {'name': name,
+           'changes': {},
+           'result': True,
+           'comment': ''}
+    if not os.path.exists(name):
+      return _error(ret, ('Specified path {0} does not exist').format(name))
+
+    ret['comment'] = 'Path {0} exists'.format(name)
+    return ret
+
+
 def managed(name,
         source=None,
         source_hash='',
@@ -945,8 +981,9 @@ def managed(name,
         file.
 
     replace
-        If this file should be replaced, if false then this command will
-        be ignored if the file exists already. Default is true.
+        If this file should be replaced.  If false, this command will
+        not overwrite file contents but will enforce permissions if the file 
+        exists already.  Default is true.
 
     context
         Overrides default context variables passed to the template.
@@ -963,6 +1000,10 @@ def managed(name,
            'comment': '',
            'name': name,
            'result': True}
+    u_check = _check_user(user, group)
+    if u_check:
+        # The specified user or group do not exist
+        return _error(ret, u_check)
     if not os.path.isabs(name):
         return _error(
             ret, ('Specified file {0} is not an absolute'
@@ -977,7 +1018,13 @@ def managed(name,
 
     if not replace:
         if os.path.exists(name):
-            ret['comment'] = 'File {0} exists. No changes made'.format(name)
+           # Check and set the permissions if necessary
+            ret, perms = _check_perms(name, ret, user, group, mode)
+            if __opts__['test']:
+                ret['comment'] = 'File {0} not updated'.format(name)
+            elif not ret['changes'] and ret['result']:
+                ret['comment'] = ('File {0} exists with proper permissions.'
+                                  '  No changes made.').format(name)
             return ret
         if not source:
             return touch(name, makedirs=makedirs)
@@ -1214,6 +1261,10 @@ def directory(name,
            'changes': {},
            'result': True,
            'comment': ''}
+    u_check = _check_user(user, group)
+    if u_check:
+        # The specified user or group do not exist
+        return _error(ret, u_check)
     if not os.path.isabs(name):
         return _error(
             ret, 'Specified file {0} is not an absolute path'.format(name))
@@ -1403,6 +1454,10 @@ def recurse(name,
            'result': True,
            'comment': {}  # { path: [comment, ...] }
            }
+    u_check = _check_user(user, group)
+    if u_check:
+        # The specified user or group do not exist
+        return _error(ret, u_check)
     if not os.path.isabs(name):
         return _error(
             ret, 'Specified file {0} is not an absolute path'.format(name))
@@ -1446,6 +1501,9 @@ def recurse(name,
             comments.extend(_ret['comment'])
         if _ret['changes']:
             ret['changes'][path] = changetype
+
+    # If source is a list, find which in the list actually exists
+    source, source_hash = _source_list(source, '', env)
 
     vdir = set()
     for fn_ in __salt__['cp.cache_dir'](source, env, include_empty):
@@ -1502,7 +1560,7 @@ def recurse(name,
         removed = _clean_dir(name, list(keep))
         if removed:
             ret['changes']['removed'] = removed
-            ret['comment'] += 'Files cleaned from directory {0}'.format(name)
+            ret['comment'] = 'Files cleaned from directory {0}'.format(name)
     return ret
 
 
@@ -1563,15 +1621,23 @@ def sed(name, before, after, limit='', backup='.bak', options='-r -e',
         ret['comment'] = 'File {0} is set to be updated'.format(name)
         ret['result'] = None
         return ret
+    with open(name, 'rb') as fp_:
+        slines = fp_.readlines()
     # should be ok now; perform the edit
     __salt__['file.sed'](name, before, after, limit, backup, options, flags)
+    with open(name, 'rb') as fp_:
+        nlines = fp_.readlines()
 
     # check the result
     ret['result'] = __salt__['file.contains_regex'](name, after)
+    if slines != nlines:
+        # Changes happened, add them
+        ret['changes']['diff'] = (
+                ''.join(difflib.unified_diff(slines, nlines))
+                )
 
     if ret['result']:
         ret['comment'] = 'File successfully edited'
-        ret['changes'].update({'old': before, 'new': after})
     else:
         ret['comment'] = 'Expected edit does not appear in file'
 
@@ -1630,16 +1696,25 @@ def comment(name, regex, char='#', backup='.bak'):
         ret['comment'] = 'File {0} is set to be updated'.format(name)
         ret['result'] = None
         return ret
+    with open(name, 'rb') as fp_:
+        slines = fp_.readlines()
     # Perform the edit
     __salt__['file.comment'](name, regex, char, backup)
+
+    with open(name, 'rb') as fp_:
+        nlines = fp_.readlines()
 
     # Check the result
     ret['result'] = __salt__['file.contains_regex'](name, unanchor_regex)
 
+    if slines != nlines:
+        # Changes happened, add them
+        ret['changes']['diff'] = (
+                ''.join(difflib.unified_diff(slines, nlines))
+                )
+
     if ret['result']:
         ret['comment'] = 'Commented lines successfully'
-        ret['changes'] = {'old': '',
-                'new': 'Commented lines matching: {0}'.format(regex)}
     else:
         ret['comment'] = 'Expected commented lines not found'
 
@@ -1679,8 +1754,6 @@ def uncomment(name, regex, char='#', backup='.bak'):
     if not check_res:
         return _error(ret, check_msg)
 
-    unanchor_regex = regex.lstrip('^')
-
     # Make sure the pattern appears in the file
     if __salt__['file.contains_regex'](name, regex):
         ret['comment'] = 'Pattern already uncommented'
@@ -1696,23 +1769,34 @@ def uncomment(name, regex, char='#', backup='.bak'):
         ret['comment'] = 'File {0} is set to be updated'.format(name)
         ret['result'] = None
         return ret
+
+    with open(name, 'rb') as fp_:
+        slines = fp_.readlines()
+
     # Perform the edit
     __salt__['file.uncomment'](name, regex, char, backup)
+
+    with open(name, 'rb') as fp_:
+        nlines = fp_.readlines()
 
     # Check the result
     ret['result'] = __salt__['file.contains_regex'](name, regex)
 
+    if slines != nlines:
+        # Changes happened, add them
+        ret['changes']['diff'] = (
+                ''.join(difflib.unified_diff(slines, nlines))
+                )
+
     if ret['result']:
         ret['comment'] = 'Uncommented lines successfully'
-        ret['changes'] = {'old': '',
-                'new': 'Uncommented lines matching: {0}'.format(regex)}
     else:
         ret['comment'] = 'Expected uncommented lines not found'
 
     return ret
 
 
-def append(name, text, makedirs=False):
+def append(name, text=None, makedirs=False, source=None, source_hash=None):
     '''
     Ensure that some text appears at the end of a file
 
@@ -1757,8 +1841,31 @@ def append(name, text, makedirs=False):
     if not check_res:
         return _error(ret, check_msg)
 
+    if source:
+        # get cached file or copy it to cache
+        cached_source_path = __salt__['cp.cache_file'](source)
+        logger.debug(
+            "state file.append cached source {0} -> {1}".format(
+                source, cached_source_path
+            )
+        )
+        cached_source = managed(
+            cached_source_path, source=source, source_hash=source_hash
+        )
+        if cached_source['result'] is True:
+            logger.debug(
+                "state file.append is loading text contents from cached source "
+                "{0}({1})".format(source, cached_source_path)
+            )
+            text = open(cached_source_path, 'r').read()
+
     if isinstance(text, string_types):
         text = (text,)
+
+    with open(name, 'rb') as fp_:
+        slines = fp_.readlines()
+
+    count = 0
 
     for chunk in text:
 
@@ -1769,8 +1876,11 @@ def append(name, text, makedirs=False):
         try:
             lines = chunk.split('\n')
         except AttributeError:
-            logger.debug('Error appending text to %s; given object is: %s',
-                    name, type(chunk))
+            logger.debug(
+                'Error appending text to {0}; given object is: {1}'.format(
+                    name, type(chunk)
+                )
+            )
             return _error(ret, 'Given text is not a string')
 
         for line in lines:
@@ -1779,10 +1889,16 @@ def append(name, text, makedirs=False):
                 ret['result'] = None
                 return ret
             __salt__['file.append'](name, line)
-            cgs = ret['changes'].setdefault('new', [])
-            cgs.append(line)
+            count += 1
 
-    count = len(ret['changes'].get('new', []))
+    with open(name, 'rb') as fp_:
+        nlines = fp_.readlines()
+
+    if slines != nlines:
+        # Changes happened, add them
+        ret['changes']['diff'] = (
+                ''.join(difflib.unified_diff(slines, nlines))
+                )
 
     ret['comment'] = 'Appended {0} lines'.format(count)
     ret['result'] = True

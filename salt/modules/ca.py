@@ -12,18 +12,22 @@ Add the following values in /etc/salt/minion for the
 CA module to function properly::
 
 ca.cert_base_path: '/etc/pki/koji'
-
-
 '''
 
+# Import Python libs
 import os
-import sys
 import time
 import logging
 import hashlib
-import OpenSSL
 
-import salt.utils
+has_ssl = False
+try:
+    import OpenSSL
+    has_ssl = True
+except ImportError:
+    pass
+
+# Import Salt libs
 from salt.exceptions import CommandExecutionError
 
 log = logging.getLogger(__name__)
@@ -32,45 +36,53 @@ def __virtual__():
     '''
     Only load this module if the ca config options are set
     '''
+    if has_ssl:
+        return 'ca'
+    return False
 
-    return 'ca'
 
 def _cert_base_path():
+    '''
+    Return the base path for certs
+    '''
     if 'ca.cert_base_path' in __opts__:
         return __opts__['ca.cert_base_path']
-    raise CommandExecutionError("Please set the 'ca.cert_base_path' in the minion configuration")
+    raise CommandExecutionError(
+            "Please set the 'ca.cert_base_path' in the minion configuration"
+            )
 
 
 def _new_serial(ca_name, CN):
-
     '''
-    Return a serial number in hex using md5sum, based upon the the ca_name and CN values
+    Return a serial number in hex using md5sum, based upon the the ca_name and
+    CN values
 
     ca_name
         name of the CA
     CN
         common name in the request
     '''
-
-    hashnum = int(hashlib.md5('{0}_{1}_{2}'.format(ca_name, CN, int(time.time()))).hexdigest(), 16)
-    log.debug("Hashnum: {0}".format(hashnum))
+    hashnum = int(
+            hashlib.md5(
+                '{0}_{1}_{2}'.format(
+                    ca_name,
+                    CN,
+                    int(time.time()))
+                ).hexdigest(),
+            16
+            )
+    log.debug('Hashnum: {0}'.format(hashnum))
 
     # record the hash somewhere
     cachedir = __opts__['cachedir']
-    log.debug("cachedir: {0}".format(cachedir))
+    log.debug('cachedir: {0}'.format(cachedir))
     serial_file = '{0}/{1}.serial'.format(cachedir, ca_name)
-    if os.path.exists(serial_file):
-        fr = open(serial_file, 'r')
-        lines = fr.readlines()
-        fr.close()
-
     with open(serial_file, 'a+') as f:
         f.write(str(hashnum))
 
     return hashnum
 
 def _write_cert_to_database(ca_name, cert):
-
     '''
     write out the index.txt database file in the appropriate directory to
     track certificates
@@ -80,7 +92,6 @@ def _write_cert_to_database(ca_name, cert):
     cert
         certificate to be recorded
     '''
-
     index_file = "{0}/{1}/index.txt".format(_cert_base_path(), ca_name)
 
     expire_date = cert.get_notAfter()
@@ -90,17 +101,24 @@ def _write_cert_to_database(ca_name, cert):
     subject = '/'
 
     # then we can add the rest of the subject
-    subject += '/'.join(['{0}={1}'.format(x,y) for x,y in cert.get_subject().get_components()])
+    subject += '/'.join(
+            ['{0}={1}'.format(
+                x,y
+                ) for x,y in cert.get_subject().get_components()]
+            )
     subject += '\n'
 
-    index_data = "V\t{0}\t\t{1}\tunknown\t{2}".format(expire_date, serial_number, subject)
+    index_data = 'V\t{0}\t\t{1}\tunknown\t{2}'.format(
+            expire_date,
+            serial_number,
+            subject
+            )
 
     with open(index_file, 'a+') as f:
         f.write(index_data)
 
 
 def _ca_exists(ca_name):
-
     '''
     Verify whether a Certificate Authority (CA) already exists
 
@@ -108,12 +126,26 @@ def _ca_exists(ca_name):
         name of the CA
     '''
 
-    if os.path.exists("{0}/{1}/{2}_ca_cert.crt".format(_cert_base_path(), ca_name, ca_name)):
+    if os.path.exists('{0}/{1}/{2}_ca_cert.crt'.format(
+            _cert_base_path(),
+            ca_name,
+            ca_name
+            )):
         return True
     return False
 
-def create_ca(ca_name, bits=2048, days=365, CN='localhost', C="US", ST="Utah", L="Centerville", O="Salt Stack", OU=None, emailAddress='xyz@pdq.net'):
 
+def create_ca(
+        ca_name,
+        bits=2048,
+        days=365,
+        CN='localhost',
+        C='US',
+        ST='Utah',
+        L='Salt Lake City',
+        O='Salt Stack',
+        OU=None,
+        emailAddress='xyz@pdq.net'):
     '''
     Create a Certificate Authority (CA)
 
@@ -151,12 +183,11 @@ def create_ca(ca_name, bits=2048, days=365, CN='localhost', C="US", ST="Utah", L
 
     /etc/pki/koji/koji_ca_cert.crt
     '''
-
     if _ca_exists(ca_name):
-        return "Certificate for CA named '{0}' already exists".format(ca_name)
+        return 'Certificate for CA named "{0}" already exists'.format(ca_name)
 
-    if not os.path.exists("{0}/{1}".format(_cert_base_path(), ca_name)):
-        os.makedirs("{0}/{1}".format(_cert_base_path(), ca_name))
+    if not os.path.exists('{0}/{1}'.format(_cert_base_path(), ca_name)):
+        os.makedirs('{0}/{1}'.format(_cert_base_path(), ca_name))
 
     key = OpenSSL.crypto.PKey()
     key.generate_key(OpenSSL.crypto.TYPE_RSA, 2048)
@@ -179,36 +210,72 @@ def create_ca(ca_name, bits=2048, days=365, CN='localhost', C="US", ST="Utah", L
     ca.set_pubkey(key)
 
     ca.add_extensions([
-      OpenSSL.crypto.X509Extension("basicConstraints", True,
-                                   "CA:TRUE, pathlen:0"),
-      OpenSSL.crypto.X509Extension("keyUsage", True,
-                                   "keyCertSign, cRLSign"),
-      OpenSSL.crypto.X509Extension("subjectKeyIdentifier", False, "hash",
+      OpenSSL.crypto.X509Extension('basicConstraints', True,
+                                   'CA:TRUE, pathlen:0'),
+      OpenSSL.crypto.X509Extension('keyUsage', True,
+                                   'keyCertSign, cRLSign'),
+      OpenSSL.crypto.X509Extension('subjectKeyIdentifier', False, 'hash',
                                    subject=ca)
       ])
 
     ca.add_extensions([
-      OpenSSL.crypto.X509Extension('authorityKeyIdentifier', False, 'issuer:always,keyid:always',
-                                   issuer=ca)
+      OpenSSL.crypto.X509Extension(
+          'authorityKeyIdentifier',
+          False,
+          'issuer:always,keyid:always',
+          issuer=ca
+          )
       ])
-    ca.sign(key, "sha1")
+    ca.sign(key, 'sha1')
 
 
-    ca_key = open("{0}/{1}/{2}_ca_cert.key".format(_cert_base_path(), ca_name, ca_name), 'w')
-    ca_key.write(OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key))
+    ca_key = open(
+            '{0}/{1}/{2}_ca_cert.key'.format(
+                _cert_base_path(),
+                ca_name,
+                ca_name
+                ),
+            'w'
+            )
+    ca_key.write(
+            OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key)
+            )
     ca_key.close()
 
-    ca_crt = open("{0}/{1}/{2}_ca_cert.crt" % (_cert_base_path(), ca_name, ca_name), 'w')
-    ca_crt.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, ca))
+    ca_crt = open(
+            '{0}/{1}/{2}_ca_cert.crt'.format(
+                _cert_base_path(),
+                ca_name,
+                ca_name
+                ),
+            'w'
+            )
+    ca_crt.write(
+            OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, ca)
+            )
     ca_crt.close()
 
     _write_cert_to_database(ca_name, ca)
 
-    return "Created CA '{0}', certificate is located at '{1}/{2}/{3}_ca_cert.crt'".format(ca_name, _cert_base_path(), ca_name, ca_name)
+    return ('Created CA "{0}", certificate is located at '
+            '"{1}/{2}/{3}_ca_cert.crt"').format(
+                    ca_name,
+                    _cert_base_path(),
+                    ca_name,
+                    ca_name
+                    )
 
 
-def create_csr(ca_name, bits=2048, CN='localhost', C="US", ST="Utah", L="Centerville", O="Salt Stack", OU=None, emailAddress='xyz@pdq.net'):
-
+def create_csr(
+        ca_name,
+        bits=2048,
+        CN='localhost',
+        C='US',
+        ST='Utah',
+        L='Salt Lake City',
+        O='Salt Stack',
+        OU=None,
+        emailAddress='xyz@pdq.net'):
     '''
     Create a Certificate Signing Request (CSR) for a
     particular Certificate Authority (CA)
@@ -242,20 +309,26 @@ def create_csr(ca_name, bits=2048, CN='localhost', C="US", ST="Utah", L="Centerv
     ca_name='koji'
     CN='test.egavas.org'
 
-    the resulting CSR, and corresponding key, would be written in the following location:
+    the resulting CSR, and corresponding key, would be written in the
+    following location:
 
     /etc/pki/koji/certs/test.egavas.org.csr
     /etc/pki/koji/certs/test.egavas.org.key
     '''
 
     if not _ca_exists(ca_name):
-        return "Certificate for CA named '{0}' does not exist, please create it first.".format(ca_name)
+        return ('Certificate for CA named "{0}" does not exist, please create '
+                'it first.').format(ca_name)
 
-    if not os.path.exists("{0}/{1}/certs/".format(_cert_base_path(), ca_name)):
+    if not os.path.exists('{0}/{1}/certs/'.format(_cert_base_path(), ca_name)):
         os.makedirs("{0}/{1}/certs/".format(_cert_base_path(), ca_name))
 
-    if os.path.exists("{0}/{1}/certs/{2}.csr".format(_cert_base_path(), ca_name, CN)):
-        return "Certificate Request '{0}' already exists".format(ca_name)
+    if os.path.exists('{0}/{1}/certs/{2}.csr'.format(
+            _cert_base_path(),
+            ca_name,
+            CN)
+            ):
+        return 'Certificate Request "{0}" already exists'.format(ca_name)
 
     key = OpenSSL.crypto.PKey()
     key.generate_key(OpenSSL.crypto.TYPE_RSA, bits)
@@ -271,29 +344,47 @@ def create_csr(ca_name, bits=2048, CN='localhost', C="US", ST="Utah", L="Centerv
     req.get_subject().CN = CN
     req.get_subject().emailAddress = emailAddress
     req.set_pubkey(key)
-    req.sign(key, "sha1")
+    req.sign(key, 'sha1')
 
     # Write private key and request
-    priv_key = open("{0}/{1}/certs/{2}.key".format(_cert_base_path(), ca_name, CN), 'w')
-    priv_key.write(OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key))
+    priv_key = open(
+            '{0}/{1}/certs/{2}.key'.format(_cert_base_path(), ca_name, CN),
+            'w+'
+            )
+    priv_key.write(
+            OpenSSL.crypto.dump_privatekey(OpenSSL.crypto.FILETYPE_PEM, key)
+            )
     priv_key.close()
 
-    csr = open("{0}/{1}/certs/{2}.csr".format(_cert_base_path(), ca_name, CN), 'w')
-    csr.write(OpenSSL.crypto.dump_certificate_request(OpenSSL.crypto.FILETYPE_PEM, req))
+    csr = open(
+            '{0}/{1}/certs/{2}.csr'.format(_cert_base_path(), ca_name, CN),
+            'w+'
+            )
+    csr.write(
+            OpenSSL.crypto.dump_certificate_request(
+                OpenSSL.crypto.FILETYPE_PEM,
+                req
+                )
+            )
     csr.close()
 
-    return "Created CSR for '{0}', request is located at '{1}/{2}/certs/{3}.csr".format(ca_name, _cert_base_path(), ca_name, CN)
+    return ('Created CSR for "{0}", request is located at '
+            '"{1}/{2}/certs/{3}.csr"').format(
+                    ca_name,
+                    _cert_base_path(),
+                    ca_name,
+                    CN
+                    )
 
 
 def create_self_signed_cert(bits=2048):
     '''
     Create a Self-Signed Certificate (CERT) -- Not yet implemented
     '''
-
     pass
 
-def create_ca_signed_cert(ca_name, CN, days=365):
 
+def create_ca_signed_cert(ca_name, CN, days=365):
     '''
     Create a Certificate (CERT) signed by a
     particular Certificate Authority (CA)
@@ -311,20 +402,41 @@ def create_ca_signed_cert(ca_name, CN, days=365):
     The CN *must* match an existing CSR generated by create_csr. If it
     does not, this method does nothing.
     '''
-
-    if os.path.exists("{0}/{1}/{2}.crt".format(_cert_base_path(), ca_name, CN)):
-        return "Certificate '{0}' already exists" % ca_name
-
-    try:
-        ca_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, open("{0}/{1}/{2}_ca_cert.crt".format(_cert_base_path(), ca_name, ca_name)).read())
-        ca_key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, open("{0}/{1}/{2}_ca_cert.key".format(_cert_base_path(), ca_name, ca_name)).read())
-    except IOError as e:
-        return "There is no CA named '{0}".format(ca_name)
+    if os.path.exists(
+            '{0}/{1}/{2}.crt'.format(_cert_base_path(), ca_name, CN)
+            ):
+        return 'Certificate "{0}" already exists'.format(ca_name)
 
     try:
-        req = OpenSSL.crypto.load_certificate_request(OpenSSL.crypto.FILETYPE_PEM, open("{0}/{1}/certs/{2}.csr".format(_cert_base_path(), ca_name, CN)).read())
-    except IOError as e:
-        return "There is no CSR that matches the CN '{0}".format(CN)
+        ca_cert = OpenSSL.crypto.load_certificate(
+                OpenSSL.crypto.FILETYPE_PEM,
+                open('{0}/{1}/{2}_ca_cert.crt'.format(
+                    _cert_base_path(),
+                    ca_name, ca_name
+                    )).read()
+                )
+        ca_key = OpenSSL.crypto.load_privatekey(
+                OpenSSL.crypto.FILETYPE_PEM,
+                open('{0}/{1}/{2}_ca_cert.key'.format(
+                    _cert_base_path(),
+                    ca_name,
+                    ca_name
+                    )).read()
+                )
+    except IOError:
+        return 'There is no CA named "{0}"'.format(ca_name)
+
+    try:
+        req = OpenSSL.crypto.load_certificate_request(
+                OpenSSL.crypto.FILETYPE_PEM,
+                open('{0}/{1}/certs/{2}.csr'.format(
+                    _cert_base_path(),
+                    ca_name,
+                    CN
+                    )).read()
+                )
+    except IOError:
+        return 'There is no CSR that matches the CN "{0}"'.format(CN)
 
     cert = OpenSSL.crypto.X509()
     cert.set_subject(req.get_subject())
@@ -333,18 +445,33 @@ def create_ca_signed_cert(ca_name, CN, days=365):
     cert.set_serial_number(_new_serial(ca_name, CN))
     cert.set_issuer(ca_cert.get_subject())
     cert.set_pubkey(req.get_pubkey())
-    cert.sign(ca_key, "sha1")
+    cert.sign(ca_key, 'sha1')
 
-    crt = open("{0}/{1}/certs/{2}.crt".format(_cert_base_path(), ca_name, CN), 'w+')
-    crt.write(OpenSSL.crypto.dump_certificate(OpenSSL.crypto.FILETYPE_PEM, cert))
+    crt = open('{0}/{1}/certs/{2}.crt'.format(
+        _cert_base_path(),
+        ca_name,
+        CN
+        ), 'w+')
+    crt.write(
+            OpenSSL.crypto.dump_certificate(
+                OpenSSL.crypto.FILETYPE_PEM,
+                cert
+                )
+            )
     crt.close()
 
     _write_cert_to_database(ca_name, cert)
 
-    return "Created Certificate for '{0}', located at '{1}/{2}/certs/{3}.crt".format(ca_name, _cert_base_path(), ca_name, CN)
+    return ('Created Certificate for "{0}", located at '
+            '"{1}/{2}/certs/{3}.crt"').format(
+                    ca_name,
+                    _cert_base_path(),
+                    ca_name,
+                    CN
+                    )
+
 
 def create_pkcs12(ca_name, CN, passphrase=''):
-
     '''
     Create a PKCS#12 browser certificate for a particular Certificate (CN)
 
@@ -355,20 +482,45 @@ def create_pkcs12(ca_name, CN, passphrase=''):
     passphrase
         used to unlock the PKCS#12 certificate when loaded into the browser
     '''
-
-    if os.path.exists("{0}/{1}/certs/{2}.p12".format(_cert_base_path(), ca_name, CN)):
-        return "Certificate '{0}' already exists".format(CN)
+    if os.path.exists(
+            '{0}/{1}/certs/{2}.p12'.format(
+                _cert_base_path(),
+                ca_name,
+                CN)
+            ):
+        return 'Certificate "{0}" already exists'.format(CN)
 
     try:
-        ca_cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, open("{0}/{1}/{2}_ca_cert.crt".format(_cert_base_path(), ca_name, ca_name)).read())
-    except IOError as e:
-        return "There is no CA named '{0}".format(ca_name)
+        ca_cert = OpenSSL.crypto.load_certificate(
+                OpenSSL.crypto.FILETYPE_PEM,
+                open('{0}/{1}/{2}_ca_cert.crt'.format(
+                    _cert_base_path(),
+                    ca_name,
+                    ca_name
+                    )).read()
+                )
+    except IOError:
+        return 'There is no CA named "{0}"'.format(ca_name)
 
     try:
-        cert = OpenSSL.crypto.load_certificate(OpenSSL.crypto.FILETYPE_PEM, open("{0}/{1}/certs/{2}.crt".format(_cert_base_path(), ca_name, CN)).read())
-        key = OpenSSL.crypto.load_privatekey(OpenSSL.crypto.FILETYPE_PEM, open("{0}/{1}/certs/{2}.key".format(_cert_base_path(), ca_name, CN)).read())
-    except IOError as e:
-        return "There is no certificate that matches the CN '{0}".format(CN)
+        cert = OpenSSL.crypto.load_certificate(
+                OpenSSL.crypto.FILETYPE_PEM,
+                open('{0}/{1}/certs/{2}.crt'.format(
+                    _cert_base_path(),
+                    ca_name,
+                    CN
+                    )).read()
+                )
+        key = OpenSSL.crypto.load_privatekey(
+                OpenSSL.crypto.FILETYPE_PEM,
+                open('{0}/{1}/certs/{2}.key'.format(
+                    _cert_base_path(),
+                    ca_name,
+                    CN
+                    )).read()
+                )
+    except IOError:
+        return 'There is no certificate that matches the CN "{0}"'.format(CN)
 
     pkcs12 = OpenSSL.crypto.PKCS12()
 
@@ -376,14 +528,41 @@ def create_pkcs12(ca_name, CN, passphrase=''):
     pkcs12.set_ca_certificates([ca_cert])
     pkcs12.set_privatekey(key)
 
-    with open("{0}/{1}/certs/{2}.p12".format(_cert_base_path(), ca_name, CN), 'w') as f:
+    with open('{0}/{1}/certs/{2}.p12'.format(
+        _cert_base_path(),
+        ca_name,
+        CN
+        ), 'w') as f:
         f.write(pkcs12.export(passphrase=passphrase))
 
-    return "Created PKCS#12 Certificate for '{0}', located at '{1}/{2}/certs/{3}.p12".format(CN, _cert_base_path(), ca_name, CN)
+    return ('Created PKCS#12 Certificate for "{0}", located at '
+            '"{1}/{2}/certs/{3}.p12"').format(
+                    CN,
+                    _cert_base_path(),
+                    ca_name,
+                    CN
+                    )
 
 if __name__ == '__main__':
-    create_ca('koji', days=365, CN='localhost', C="US", ST="Utah", L="Centerville", O="Salt Stack", emailAddress='salt@saltstack.org')
-    create_csr('koji', CN='test_system', C="US", ST="Utah", L="Centerville", O="Salt Stack", OU=None, emailAddress='test_system@saltstac.org')
+    create_ca(
+            'koji',
+            days=365,
+            CN='localhost',
+            C='US',
+            ST='Utah',
+            L='Salt Lake City',
+            O='Salt Stack',
+            emailAddress='salt@saltstack.org'
+            )
+    create_csr(
+            'koji',
+            CN='test_system',
+            C="US",
+            ST="Utah",
+            L="Centerville",
+            O="Salt Stack",
+            OU=None,
+            emailAddress='test_system@saltstack.org'
+            )
     create_ca_signed_cert('koji', 'test_system')
     create_pkcs12('koji', 'test_system', passphrase='test')
-

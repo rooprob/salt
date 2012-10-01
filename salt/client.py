@@ -36,9 +36,6 @@ import time
 import getpass
 import fnmatch
 
-# Import zmq modules
-import zmq
-
 # Import salt modules
 import salt.config
 import salt.payload
@@ -176,7 +173,7 @@ class LocalClient(object):
                 if comps[0] not in grains:
                     minions.remove(id_)
                     continue
-                if isinstance(grains[comps[0]], list):
+                if isinstance(grains.get(comps[0]), list):
                     # We are matching a single component to a single list member
                     found = False
                     for member in grains[comps[0]]:
@@ -188,7 +185,7 @@ class LocalClient(object):
                     minions.remove(id_)
                     continue
                 if fnmatch.fnmatch(
-                    str(grains[comps[0]]).lower(),
+                    str(grains.get(comps[0], '').lower()),
                     comps[1].lower(),
                     ):
                     continue
@@ -555,7 +552,7 @@ class LocalClient(object):
                 # The timeout +1 has not been reached and there is still a
                 # write tag for the syndic
                 continue
-            if len(fret) >= len(minions):
+            if len(found.intersection(minions)) >= len(minions):
                 # All minions have returned, break out of the loop
                 break
             if int(time.time()) > start + timeout:
@@ -573,7 +570,7 @@ class LocalClient(object):
                     continue
                 if verbose:
                     if tgt_type == 'glob' or tgt_type == 'pcre':
-                        if not len(fret) >= len(minions):
+                        if len(found.intersection(minions)) >= len(minions):
                             print('\nThe following minions did not return:')
                             fail = sorted(list(minions.difference(found)))
                             for minion in fail:
@@ -627,7 +624,7 @@ class LocalClient(object):
                 # The timeout +1 has not been reached and there is still a
                 # write tag for the syndic
                 continue
-            if len(ret) >= len(minions):
+            if len(found.intersection(minions)) >= len(minions):
                 break
             if int(time.time()) > start + timeout:
                 break
@@ -680,7 +677,7 @@ class LocalClient(object):
                 # The timeout +1 has not been reached and there is still a
                 # write tag for the syndic
                 continue
-            if len(ret) >= len(minions):
+            if len(set(ret.keys()).intersection(minions)) >= len(minions):
                 # All Minions have returned
                 return ret
             if int(time.time()) > start + timeout:
@@ -735,7 +732,7 @@ class LocalClient(object):
                 # The timeout +1 has not been reached and there is still a
                 # write tag for the syndic
                 continue
-            if len(ret) >= len(minions):
+            if len(set(ret.keys()).intersection(minions)) >= len(minions):
                 return ret
             if int(time.time()) > start + timeout:
                 return ret
@@ -762,7 +759,6 @@ class LocalClient(object):
             print('-' * len(msg) + '\n')
         if timeout is None:
             timeout = self.opts['timeout']
-        inc_timeout = timeout
         jid_dir = salt.utils.jid_dir(
                 jid,
                 self.opts['cachedir'],
@@ -774,7 +770,7 @@ class LocalClient(object):
         wtag = os.path.join(jid_dir, 'wtag*')
         # Check to see if the jid is real, if not return the empty dict
         if not os.path.isdir(jid_dir):
-            return ret_
+            return ret
         # Wait for the hosts to check in
         while True:
             raw = self.event.get_event(timeout, jid)
@@ -783,12 +779,12 @@ class LocalClient(object):
                 ret[raw['id']] = {'ret': raw['return']}
                 if 'out' in raw:
                     ret[raw['id']]['out'] = raw['out']
-                if len(found) >= len(minions):
+                if len(found.intersection(minions)) >= len(minions):
                     # All minions have returned, break out of the loop
                     break
                 continue
             # Then event system timeout was reached and nothing was returned
-            if len(found) >= len(minions):
+            if len(found.intersection(minions)) >= len(minions):
                 # All minions have returned, break out of the loop
                 break
             if glob.glob(wtag) and not int(time.time()) > start + timeout + 1:
@@ -846,17 +842,20 @@ class LocalClient(object):
         while True:
             raw = self.event.get_event(timeout, jid)
             if not raw is None:
+                if 'syndic' in raw:
+                    minions.update(raw['syndic'])
+                    continue
                 found.add(raw['id'])
                 ret = {raw['id']: {'ret': raw['return']}}
                 if 'out' in raw:
                     ret[raw['id']]['out'] = raw['out']
                 yield ret
-                if len(found) >= len(minions):
+                if len(found.intersection(minions)) >= len(minions):
                     # All minions have returned, break out of the loop
                     break
                 continue
             # Then event system timeout was reached and nothing was returned
-            if len(found) >= len(minions):
+            if len(found.intersection(minions)) >= len(minions):
                 # All minions have returned, break out of the loop
                 break
             if glob.glob(wtag) and not int(time.time()) > start + timeout + 1:
@@ -898,8 +897,6 @@ class LocalClient(object):
                 self.opts['cachedir'],
                 self.opts['hash_type']
                 )
-        start = 999999999999
-        gstart = int(time.time())
         found = set()
         # Check to see if the jid is real, if not return the empty dict
         if not os.path.isdir(jid_dir):
@@ -968,7 +965,7 @@ class LocalClient(object):
                     'compound': self._all_minions,
                     }[expr_form](expr)
         except Exception:
-            minions = tgt
+            minions = expr
         return minions
 
     def pub(self, tgt, fun, arg=(), expr_form='glob',
@@ -1026,13 +1023,7 @@ class LocalClient(object):
         # return what we get back
         minions = self.check_minions(tgt, expr_form)
 
-        if self.opts['order_masters']:
-            # If we're a master of masters, ignore the check_minion and
-            # set the minions to the target.  This speeds up wait time
-            # for lists and ranges and makes regex and other expression
-            # forms possible
-            minions = tgt
-        elif not minions:
+        if not minions:
             return {'jid': None,
                     'minions': minions}
 

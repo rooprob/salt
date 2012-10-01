@@ -67,7 +67,7 @@ def is_empty(filename):
     try:
         return os.stat(filename).st_size == 0
     except OSError:
-        # Non-existant file or permission denied to the parent dir
+        # Non-existent file or permission denied to the parent dir
         return False
 
 
@@ -114,49 +114,6 @@ def daemonize():
     '''
     Daemonize a process
     '''
-    if 'os' in os.environ:
-        if os.environ['os'].startswith('Windows'):
-            import ctypes
-            if ctypes.windll.shell32.IsUserAnAdmin() == 0:
-                import win32api
-                executablepath = sys.executable
-                pypath = executablepath.split('\\')
-                win32api.ShellExecute(
-                    0,
-                    'runas',
-                    executablepath,
-                    os.path.join(
-                        pypath[0],
-                        os.sep,
-                        pypath[1],
-                        'Lib\\site-packages\\salt\\utils\\saltminionservice.py'
-                    ),
-                    os.path.join(pypath[0], os.sep, pypath[1]),
-                    0
-                )
-                sys.exit(0)
-            else:
-                from . import saltminionservice
-                import win32serviceutil
-                import win32service
-                import winerror
-                servicename = 'salt-minion'
-                try:
-                    status = win32serviceutil.QueryServiceStatus(servicename)
-                except win32service.error as details:
-                    if details[0] == winerror.ERROR_SERVICE_DOES_NOT_EXIST:
-                        saltminionservice.instart(
-                            saltminionservice.MinionService,
-                            servicename,
-                            'Salt Minion'
-                        )
-                        sys.exit(0)
-                if status[1] == win32service.SERVICE_RUNNING:
-                    win32serviceutil.StopServiceWithDeps(servicename)
-                    win32serviceutil.StartService(servicename)
-                else:
-                    win32serviceutil.StartService(servicename)
-                sys.exit(0)
     try:
         pid = os.fork()
         if pid > 0:
@@ -185,7 +142,7 @@ def daemonize():
     # A normal daemonization redirects the process output to /dev/null.
     # Unfortunately when a python multiprocess is called the output is
     # not cleanly redirected and the parent process dies when the
-    # multiprocessing process attemps to access stdout or err.
+    # multiprocessing process attempts to access stdout or err.
     #dev_null = open('/dev/null', 'rw')
     #os.dup2(dev_null.fileno(), sys.stdin.fileno())
     #os.dup2(dev_null.fileno(), sys.stdout.fileno())
@@ -200,6 +157,8 @@ def daemonize_if(opts, **kwargs):
     if 'salt-call' in sys.argv[0]:
         return
     if not opts['multiprocessing']:
+        return
+    if sys.platform.startswith('win'):
         return
     # Daemonizing breaks the proc dir, so the proc needs to be rewritten
     data = {}
@@ -421,12 +380,11 @@ def jid_dir(jid, cachedir, sum_type):
 
 def check_or_die(command):
     '''
-    Simple convienence function for modules to  use
-    for gracefully blowing up if a required tool is
-    not available in the system path.
+    Simple convenience function for modules to use for gracefully blowing up
+    if a required tool is not available in the system path.
 
-    Lazily import salt.modules.cmdmod to avoid any
-    sort of circular dependencies.
+    Lazily import `salt.modules.cmdmod` to avoid any sort of circular
+    dependencies.
     '''
     if command is None:
         raise CommandNotFoundError("'None' is not a valid command.")
@@ -456,25 +414,40 @@ def copyfile(source, dest, backup_mode='', cachedir=''):
     fd_, tgt = tempfile.mkstemp(prefix=bname, dir=dname)
     os.close(fd_)
     shutil.copyfile(source, tgt)
+    mask = os.umask(0)
+    os.umask(mask)
+    os.chmod(tgt, 0666 - mask)
     bkroot = ''
     if cachedir:
         bkroot = os.path.join(cachedir, 'file_backup')
     if backup_mode == 'minion' or backup_mode == 'both' and bkroot:
-        msecs = str(int(time.time() * 1000000))[-6:]
-        stamp = time.asctime().replace(' ', '_')
-        stamp = '{0}{1}_{2}'.format(stamp[:-4], msecs, stamp[-4:])
-        bkpath = os.path.join(
-                bkroot,
-                dname[1:],
-                '{0}_{1}'.format(bname, stamp)
-                )
-        if not os.path.isdir(os.path.dirname(bkpath)):
-            os.makedirs(os.path.dirname(bkpath))
-        shutil.copyfile(source, bkpath)
+        if os.path.exists(dest):
+            fstat = os.stat(dest)
+            msecs = str(int(time.time() * 1000000))[-6:]
+            stamp = time.asctime().replace(' ', '_')
+            stamp = '{0}{1}_{2}'.format(stamp[:-4], msecs, stamp[-4:])
+            bkpath = os.path.join(
+                    bkroot,
+                    dname[1:],
+                    '{0}_{1}'.format(bname, stamp)
+                    )
+            if not os.path.isdir(os.path.dirname(bkpath)):
+                os.makedirs(os.path.dirname(bkpath))
+            shutil.copyfile(dest, bkpath)
+            os.chown(bkpath, fstat.st_uid, fstat.st_gid)
     if backup_mode == 'master' or backup_mode == 'both' and bkroot:
         # TODO, backup to master
         pass
-    shutil.move(tgt, dest)
+    try:
+        shutil.move(tgt, dest)
+    except Exception:
+        pass
+    if os.path.isfile(tgt):
+        # The temp file failed to move
+        try:
+            os.remove(tgt)
+        except Exception:
+            pass
 
 
 def path_join(*parts):

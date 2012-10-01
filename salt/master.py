@@ -18,6 +18,7 @@ import tempfile
 import datetime
 import pwd
 import getpass
+import resource
 import subprocess
 import multiprocessing
 
@@ -39,6 +40,7 @@ import salt.pillar
 import salt.state
 import salt.runner
 import salt.utils.event
+import salt.utils.verify
 from salt.utils.debug import enable_sigusr1_handler
 
 
@@ -62,7 +64,7 @@ def clean_proc(proc, wait_for_kill=10):
                 log.error(('Process did not die with terminate(): {0}'
                     .format(proc.pid)))
                 os.kill(signal.SIGKILL, proc.pid)
-    except (AssertionError, AttributeError) as e:
+    except (AssertionError, AttributeError):
         # Catch AssertionError when the proc is evaluated inside the child
         # Catch AttributeError when the process dies between proc.is_alive()
         # and proc.terminate() and turns into a NoneType
@@ -180,13 +182,48 @@ class Master(SMaster):
             except KeyboardInterrupt:
                 break
 
+    def __set_max_open_files(self):
+        # Let's check to see how our max open files(ulimit -n) setting is
+        mof_s, mof_h = resource.getrlimit(resource.RLIMIT_NOFILE)
+        log.info(
+            'Current values for max open files soft/hard setting: '
+            '{0}/{1}'.format(
+                mof_s, mof_h
+            )
+        )
+        # Let's grab, from the configuration file, the value to raise max open
+        # files to
+        mof_c = self.opts['max_open_files']
+        if mof_c > mof_h:
+            # The configured value is higher than what's allowed
+            log.warning(
+                'The value for the \'max_open_files\' setting, {0}, is higher '
+                'than what the user running salt is allowed to raise to, {1}. '
+                'Defaulting to {1}.'.format(mof_c, mof_h)
+            )
+            mof_c = mof_h
+
+        if mof_s < mof_c:
+            # There's room to raise the value. Raise it!
+            log.warning('Raising max open files value to {0}'.format(mof_c))
+            resource.setrlimit(resource.RLIMIT_NOFILE, (mof_c, mof_h))
+            mof_s, mof_h = resource.getrlimit(resource.RLIMIT_NOFILE)
+            log.warning(
+                'New values for max open files soft/hard values: '
+                '{0}/{1}'.format(mof_s, mof_h)
+            )
+
     def start(self):
         '''
         Turn on the master server components
         '''
+        log.info(
+            'salt-master is starting as user \'{0}\''.format(getpass.getuser())
+        )
+
         enable_sigusr1_handler()
 
-        log.warn('Starting the Salt Master')
+        self.__set_max_open_files()
         clear_old_jobs_proc = multiprocessing.Process(
             target=self._clear_old_jobs)
         clear_old_jobs_proc.start()
@@ -204,7 +241,6 @@ class Master(SMaster):
             SIGTERM is encountered.  This is required when running a salt
             master under a process minder like daemontools
             '''
-            mypid = os.getpid()
             log.warn(('Caught signal {0}, stopping the Salt Master'
                 .format(signum)))
             clean_proc(clear_old_jobs_proc)
@@ -300,7 +336,7 @@ class Publisher(multiprocessing.Process):
                             con = True
                         except zmq.ZMQError:
                             pass
-                
+
         except KeyboardInterrupt:
             pub_sock.close()
             pull_sock.close()
@@ -485,12 +521,11 @@ class AESFuncs(object):
     #
     def __init__(self, opts, crypticle):
         self.opts = opts
-        self.event = salt.utils.event.SaltEvent(
-                self.opts['sock_dir'],
-                'master'
-                )
+        self.event = salt.utils.event.MasterEvent(self.opts['sock_dir'])
         self.serial = salt.payload.Serial(opts)
         self.crypticle = crypticle
+        # Create the tops dict for loading external top data
+        self.tops = salt.loader.tops(self.opts)
         # Make a client
         self.local = salt.client.LocalClient(self.opts['conf_file'])
 
@@ -549,6 +584,10 @@ class AESFuncs(object):
         if not 'id' in load:
             log.error('Received call for external nodes without an id')
             return {}
+        ret = {}
+        # The old ext_nodes method is set to be deprecated in 0.10.4
+        # and should be removed within 3-5 releases in favor of the 
+        # "master_tops" system
         if not self.opts['external_nodes']:
             return {}
         if not salt.utils.which(self.opts['external_nodes']):
@@ -563,7 +602,6 @@ class AESFuncs(object):
                     shell=True,
                     stdout=subprocess.PIPE
                     ).communicate()[0])
-        ret = {}
         if 'environment' in ndata:
             env = ndata['environment']
         else:
@@ -576,6 +614,24 @@ class AESFuncs(object):
                 ret[env] = ndata['classes']
             else:
                 return ret
+        # Evaluate all configured master_tops interfaces
+
+        opts = {}
+        grains = {}
+        if 'opts' in load:
+            opts = load['opts']
+            if grains in load['opts']:
+                grains = load['opts']['grains']
+        for fun in self.tops:
+            try:
+                ret.update(self.tops[fun](opts, grains))
+            except Exception as exc:
+                log.error(
+                        ('Top function {0} failed with error {1} for minion '
+                         '{2}').format(fun, exc, load['id'])
+                        )
+                # If anything happens in the top generation, log it and move on
+                pass
         return ret
 
     def _serve_file(self, load):
@@ -646,6 +702,18 @@ class AESFuncs(object):
                     ret.append(os.path.relpath(root, path))
         return ret
 
+    def _dir_list(self, load):
+        '''
+        Return a list of all directories on the master
+        '''
+        ret = []
+        if load['env'] not in self.opts['file_roots']:
+            return ret
+        for path in self.opts['file_roots'][load['env']]:
+            for root, dirs, files in os.walk(path, followlinks=True):
+                ret.append(os.path.relpath(root, path))
+        return ret
+
     def _master_opts(self, load):
         '''
         Return the master options to the minion
@@ -698,7 +766,7 @@ class AESFuncs(object):
         if 'id' not in load or 'tag' not in load or 'data' not in load:
             return False
         tag = '{0}_{1}'.format(load['tag'], load['id'])
-        return self.event.fire_event(load['data'], tag)
+        return self.event.fire_event(load, tag)
 
     def _return(self, load):
         '''
@@ -707,6 +775,11 @@ class AESFuncs(object):
         # If the return data is invalid, just ignore it
         if 'return' not in load or 'jid' not in load or 'id' not in load:
             return False
+        if load['jid'] == 'req':
+        # The minion is returning a standalone job, request a jobid
+            load['jid'] = salt.utils.prep_jid(
+                    self.opts['cachedir'],
+                    self.opts['hash_type'])
         log.info('Got return from {id} for job {jid}'.format(**load))
         self.event.fire_event(load, load['jid'])
         if not self.opts['job_cache']:
@@ -773,6 +846,7 @@ class AESFuncs(object):
             return False
 
         # Format individual return loads
+        self.event.fire_event({'syndic': load['return'].keys()}, load['jid'])
         for key, item in load['return'].items():
             ret = {'jid': load['jid'],
                    'id': key,
@@ -1006,10 +1080,7 @@ class ClearFuncs(object):
         self.master_key = master_key
         self.crypticle = crypticle
         # Create the event manager
-        self.event = salt.utils.event.SaltEvent(
-                self.opts['sock_dir'],
-                'master'
-                )
+        self.event = salt.utils.event.MasterEvent(self.opts['sock_dir'])
         # Make a client
         self.local = salt.client.LocalClient(self.opts['conf_file'])
 
@@ -1071,10 +1142,11 @@ class ClearFuncs(object):
         fmode = os.stat(filename)
 
         if os.getuid() == 0:
-            if not fmode.st_uid == uid or not fmode.st_gid == gid:
-                if self.opts.get('permissive_pki_access', False) \
-                  and fmode.st_gid in groups:
-                    return True
+            if fmode.st_uid == uid or not fmode.st_gid == gid:
+                return True
+            elif self.opts.get('permissive_pki_access', False) \
+                    and fmode.st_gid in groups:
+                return True
         else:
             if stat.S_IWOTH & fmode.st_mode:
                 # don't allow others to write to the file
@@ -1138,15 +1210,19 @@ class ClearFuncs(object):
         Authenticate the client, use the sent public key to encrypt the aes key
         which was generated at start up.
 
-        This method fires an event over the master event manager. The evnt is
+        This method fires an event over the master event manager. The event is
         tagged "auth" and returns a dict with information about the auth
         event
         '''
+        # 0. Check for max open files
         # 1. Verify that the key we are receiving matches the stored key
         # 2. Store the key if it is not there
         # 3. make an rsa key with the pub key
         # 4. encrypt the aes key as an encrypted salt.payload
         # 5. package the return and return it
+
+        salt.utils.verify.check_max_open_files(self.opts)
+
         log.info('Authentication request from {id}'.format(**load))
         pubfn = os.path.join(self.opts['pki_dir'],
                 'minions',

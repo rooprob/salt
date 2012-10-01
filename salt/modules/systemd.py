@@ -2,7 +2,6 @@
 Provide the service module for systemd
 '''
 # Import Python libs
-import os
 import re
 # Import Salt libs
 import salt.utils
@@ -59,7 +58,7 @@ def get_enabled():
         salt '*' service.get_enabled
     '''
     ret = []
-    for name, state in enumerate(_get_all_unit_files()):
+    for name, state in _get_all_unit_files().iteritems():
         if state == 'enabled':
             ret.append(name)
     return sorted(ret)
@@ -74,7 +73,7 @@ def get_disabled():
         salt '*' service.get_disabled
     '''
     ret = []
-    for name, state in enumerate(_get_all_unit_files()):
+    for name, state in _get_all_unit_files().iteritems():
         if state == 'disabled':
             ret.append(name)
     return sorted(ret)

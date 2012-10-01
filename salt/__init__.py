@@ -6,8 +6,9 @@ Make me some salt!
 import os
 import sys
 import logging
+import getpass
 
-# Import salt libs, the try block bypasses an issue at build time so that c
+# Import salt libs, the try block bypasses an issue at build time so that
 # modules don't cause the build to fail
 from salt.version import __version__
 
@@ -18,6 +19,7 @@ try:
 except ImportError as e:
     if e.args[0] != 'No module named _msgpack':
         raise
+
 
 class Master(parsers.MasterOptionParser):
     '''
@@ -50,12 +52,13 @@ class Master(parsers.MasterOptionParser):
             sys.exit(err.errno)
 
         self.setup_logfile_logger()
+        logging.getLogger(__name__).warn('Setting up the Salt Master')
 
         # Late import so logging works correctly
         if not verify_socket(self.config['interface'],
                              self.config['publish_port'],
                              self.config['ret_port']):
-            self.exit(4, 'The ports are not available to bind')
+            self.exit(4, 'The ports are not available to bind\n')
 
         import salt.master
         master = salt.master.Master(self.config)
@@ -96,6 +99,12 @@ class Minion(parsers.MinionOptionParser):
             sys.exit(err.errno)
 
         self.setup_logfile_logger()
+        log = logging.getLogger(__name__)
+        log.warn(
+            'Setting up the Salt Minion "{0}"'.format(
+                self.config['id']
+            )
+        )
 
         # Late import so logging works correctly
         import salt.minion
@@ -110,7 +119,7 @@ class Minion(parsers.MinionOptionParser):
             if check_user(self.config['user']):
                 minion.tune_in()
         except KeyboardInterrupt:
-            logging.getLogger(__name__).warn('Stopping the Salt Minion')
+            log.warn('Stopping the Salt Minion')
             raise SystemExit('\nExiting on Ctrl-c')
 
 
@@ -137,8 +146,13 @@ class Syndic(parsers.SyndicOptionParser):
         except OSError, err:
             sys.exit(err.errno)
 
-
         self.setup_logfile_logger()
+        log = logging.getLogger(__name__)
+        log.warn(
+            'Setting up the Salt Syndic Minion "{0}"'.format(
+                self.config['id']
+            )
+        )
 
         # Late import so logging works correctly
         import salt.minion
@@ -150,7 +164,5 @@ class Syndic(parsers.SyndicOptionParser):
                 syndic = salt.minion.Syndic(self.config)
                 syndic.tune_in()
             except KeyboardInterrupt:
-                logging.getLogger(__name__).warn(
-                    'Stopping the Salt Syndic Minion'
-                )
+                log.warn('Stopping the Salt Syndic Minion')
                 raise SystemExit('\nExiting on Ctrl-c')

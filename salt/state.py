@@ -20,9 +20,6 @@ import logging
 import collections
 import traceback
 
-# Import Third Party libs
-import zmq
-
 # Import Salt libs
 import salt.utils
 import salt.loader
@@ -364,7 +361,7 @@ class State(object):
                 errors.append(err)
             if not isinstance(body, dict):
                 err = ('The type {0} in {1} is not formated as a dictionary'
-                       .format(name, body['__sls__']))
+                       .format(name, body))
                 errors.append(err)
                 continue
             for state in body:
@@ -654,6 +651,42 @@ class State(object):
                             high[name][state].append(arg)
         return high, errors
 
+    def apply_exclude(self, high):
+        '''
+        Read in the __exclude__ list and remove all excluded objects from the
+        high data
+        '''
+        if '__exclude__' not in high:
+            return high
+        ex_sls = set()
+        ex_id = set()
+        exclude = high.pop('__exclude__')
+        for exc in exclude:
+            if isinstance(exc, str):
+                # The exclude statement is a string, assume it is an sls
+                ex_sls.add(exc)
+            if isinstance(exc, dict):
+                # Explicitly declared exclude
+                if len(exc) != 1:
+                    continue
+                key = exc.keys()[0]
+                if key == 'sls':
+                    ex_sls.add(exc['sls'])
+                elif key == 'id':
+                    ex_id.add(exc['id'])
+        # Now the excludes have been simplified, use them
+        if ex_sls:
+            # There are sls excludes, find the associtaed ids
+            for name, body in high.items():
+                if name.startswith('__'):
+                    continue
+                if body.get('__sls__', '') in ex_sls:
+                    ex_id.add(name)
+        for id_ in ex_id:
+            if id_ in high:
+                high.pop(id_)
+        return high
+
     def requisite_in(self, high):
         '''
         Extend the data reference with requisite_in arguments
@@ -662,6 +695,8 @@ class State(object):
         req_in_all = req_in.union(set(['require', 'watch']))
         extend = {}
         for id_, body in high.items():
+            if not isinstance(body, dict):
+                continue
             for state, run in body.items():
                 if state.startswith('__'):
                     continue
@@ -875,13 +910,18 @@ class State(object):
         '''
         present = False
         if 'watch' in low:
-            present = True
+            if not '{0}.mod_watch'.format(low['state']) in self.states:
+                if 'require' in low:
+                    low['require'].extend(low.pop('watch'))
+                else:
+                    low['require'] = low.pop('watch')
+            else:
+                present = True
         if 'require' in low:
             present = True
         if not present:
             return 'met'
         reqs = {'require': [], 'watch': []}
-        status = 'unmet'
         for r_state in reqs:
             if r_state in low:
                 for req in low[r_state]:
@@ -998,7 +1038,6 @@ class State(object):
         '''
         Process a high data call and ensure the defined states.
         '''
-        err = []
         errors = []
         # If there is extension data reconcile it
         high, ext_errors = self.reconcile_extend(high)
@@ -1008,6 +1047,7 @@ class State(object):
             return errors
         high, req_in_errors = self.requisite_in(high)
         errors += req_in_errors
+        high = self.apply_exclude(high)
         # Verify that the high data is structurally sound
         if errors:
             return errors
@@ -1020,15 +1060,99 @@ class State(object):
         ret = self.call_chunks(chunks)
         return ret
 
+    def render_template(self, high, template):
+        errors = []
+        if not high:
+            return high, errors
+
+        if not isinstance(high, dict):
+            errors.append(
+                'Template {0} does not render to a dictionary'.format(template)
+            )
+            return high, errors
+
+        invalid_items = ('include', 'exclude', 'extends')
+        for item in invalid_items:
+            if item in high:
+                errors.append(
+                    'The \'{0}\' declaration found on \'{1}\' is invalid when '
+                    'rendering single templates'.format(item, template)
+                )
+                return high, errors
+
+        for name in high:
+            if not isinstance(high[name], dict):
+                if isinstance(high[name], string_types):
+                    # Is this is a short state, it needs to be padded
+                    if '.' in high[name]:
+                        comps = high[name].split('.')
+                        high[name] = {
+                            #'__sls__': template,
+                            #'__env__': None,
+                            comps[0]: [comps[1]]
+                        }
+                        continue
+
+                    errors.append(
+                        'Name {0} in template {1} is not a dictionary'.format(
+                            name, template
+                        )
+                    )
+                    continue
+            skeys = set()
+            for key in sorted(high[name]):
+                if key.startswith('_'):
+                    continue
+                if not isinstance(high[name][key], list):
+                    continue
+                if '.' in key:
+                    comps = key.split('.')
+                    # Salt doesn't support state files such as:
+                    #
+                    # /etc/redis/redis.conf:
+                    # file.managed:
+                    # - source: salt://redis/redis.conf
+                    # - user: redis
+                    # - group: redis
+                    # - mode: 644
+                    # file.comment:
+                    # - regex: ^requirepass
+                    #
+                    # XXX: Bad example here since no features requiring a
+                    # master should be here.
+                    if comps[0] in skeys:
+                        errors.append(
+                            'Name \'{0}\' in template \'{1}\' contains '
+                            'multiple state decs of the same type'.format(
+                                name, template
+                            )
+                        )
+                        continue
+                    high[name][comps[0]] = high[name].pop(key)
+                    high[name][comps[0]].append(comps[1])
+                    skeys.add(comps[0])
+                    continue
+                skeys.add(key)
+
+                #if '__sls__' not in high[name]:
+                #    high[name]['__sls__'] = template
+                #if '__env__' not in high[name]:
+                #    high[name]['__env__'] = None
+
+        return high, errors
+
     def call_template(self, template):
         '''
         Enforce the states in a template
         '''
         high = compile_template(
             template, self.rend, self.opts['renderer'])
-        if high:
-            return self.call_high(high)
-        return high
+        if not high:
+            return high
+        high, errors = self.render_template(high, template)
+        if errors:
+            return errors
+        return self.call_high(high)
 
     def call_template_str(self, template):
         '''
@@ -1036,9 +1160,12 @@ class State(object):
         '''
         high = compile_template_str(
             template, self.rend, self.opts['renderer'])
-        if high:
-            return self.call_high(high)
-        return high
+        if not high:
+            return high
+        high, errors = self.render_template(high, '<template-str>')
+        if errors:
+            return errors
+        return self.call_high(high)
 
 
 class BaseHighState(object):
@@ -1352,9 +1479,21 @@ class BaseHighState(object):
                             state['__extend__'] = [ext]
                         else:
                             state['__extend__'].append(ext)
+                if 'exclude' in state:
+                    exc = state.pop('exclude')
+                    if not isinstance(exc, list):
+                        err = ('Exclude Declaration in SLS {0} is not formed '
+                               'as a list'.format(sls))
+                        errors.append(err)
+                    if '__exclude__' not in state:
+                        state['__exclude__'] = exc
+                    else:
+                        state['__exclude__'].extend(exc)
                 for name in state:
                     if not isinstance(state[name], dict):
                         if name == '__extend__':
+                            continue
+                        if name == '__exclude__':
                             continue
 
                         if isinstance(state[name], string_types):
@@ -1421,6 +1560,8 @@ class BaseHighState(object):
                     # The extend members can not be treated as globally unique:
                     if '__extend__' in state and '__extend__' in highstate:
                         highstate['__extend__'].extend(state.pop('__extend__'))
+                    if '__exclude__' in state and '__exclude__' in highstate:
+                        highstate['__exclude__'].extend(state.pop('__exclude__'))
                     for id_ in state:
                         if id_ in highstate:
                             if highstate[id_] != state[id_]:
@@ -1506,7 +1647,6 @@ class BaseHighState(object):
         Compile the highstate but don't run it, return the low chunks to
         see exactly what the highstate will execute
         '''
-        err = []
         top = self.get_top()
         matches = self.top_matches(top)
         high, errors = self.render_highstate(matches)

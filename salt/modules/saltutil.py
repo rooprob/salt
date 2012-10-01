@@ -9,17 +9,34 @@ import hashlib
 import shutil
 import signal
 import logging
+import sys
 
 # Import Salt libs
 import salt.payload
+import salt.state
 from salt._compat import string_types
+
+# Import esky for update functionality
+try:
+    import esky
+    has_esky = True
+except ImportError:
+    has_esky = False
 
 log = logging.getLogger(__name__)
 
-def _sync(form, env):
+def _sync(form, env=None):
     '''
     Sync the given directory in the given environment
     '''
+    if env is None:
+        # No environment passed, detect them based on gathering the top files
+        # from the master
+        env = 'base'
+        st_ = salt.state.HighState(__opts__)
+        top = st_.get_top()
+        if top:
+            env = st_.top_matches(top).keys()
     if isinstance(env, string_types):
         env = env.split(',')
     ret = []
@@ -27,18 +44,28 @@ def _sync(form, env):
     source = os.path.join('salt://_{0}'.format(form))
     mod_dir = os.path.join(__opts__['extension_modules'], '{0}'.format(form))
     if not os.path.isdir(mod_dir):
+        log.info('Creating module dir \'{0}\''.format(mod_dir))
         os.makedirs(mod_dir)
     for sub_env in env:
+        log.info('Syncing {0} for environment \'{1}\''.format(form, sub_env))
         cache = []
+        log.info('Loading cache from {0}, for {1})'.format(source, sub_env))
         cache.extend(__salt__['cp.cache_dir'](source, sub_env))
-        local_cache_dir=os.path.join(__opts__['cachedir'], 'files',sub_env,'_{0}'.format(form))
+        local_cache_dir=os.path.join(
+                __opts__['cachedir'],
+                'files',
+                sub_env,
+                '_{0}'.format(form)
+                )
+        log.debug('Local cache dir: \'{0}\''.format(local_cache_dir))
         for fn_ in cache:
-            relpath=os.path.relpath(fn_, local_cache_dir)
-            relname=os.path.splitext(relpath)[0].replace('/','.')
+            relpath = os.path.relpath(fn_, local_cache_dir)
+            relname = os.path.splitext(relpath)[0].replace(os.sep, '.')
             remote.add(relpath)
             dest = os.path.join(mod_dir, relpath)
+            log.info('Copying \'{0}\' to \'{1}\''.format(fn_, dest))
             if os.path.isfile(dest):
-                # The file is present, if the sum differes replace it
+                # The file is present, if the sum differs replace it
                 srch = hashlib.md5(open(fn_, 'r').read()).hexdigest()
                 dsth = hashlib.md5(open(dest, 'r').read()).hexdigest()
                 if srch != dsth:
@@ -90,7 +117,47 @@ def _list_emptydirs(rootdir):
             emptydirs.append(root)
     return emptydirs
 
-def sync_modules(env='base'):
+def update(version=None):
+    '''
+    Update the salt minion from the url defined in opts['update_url']
+
+
+    This feature requires the minion to be running a bdist_esky build.
+
+    The version number is optional and will default to the most recent version
+    available at opts['update_url'].
+
+    Returns details about the transaction upon completion.
+
+    CLI Example::
+
+        salt '*' saltutil.update 0.10.3
+    '''
+    if not has_esky:
+        return "Esky not available as import"
+    if not getattr(sys, "frozen", False):
+        return "Minion is not running an Esky build"
+    if not __opts__['update_url']:
+        return "'update_url' not configured on this minion"
+    app = esky.Esky(sys.executable, __opts__['update_url'])
+    oldversion = __grains__['saltversion']
+    try:
+        if not version:
+            version = app.find_update()
+        if not version:
+            return "No updates available"
+        app.fetch_version(version)
+        app.install_version(version)
+        app.cleanup()
+    except Exception as e:
+        return e
+    restarted = {}
+    for service in __opts__['update_restart_services']:
+        restarted[service] = __salt__['service.restart'](service)
+    return {'comment': 'Updated from {0} to {1}'.format(oldversion, version),
+            'restarted': restarted}
+
+def sync_modules(env=None):
     '''
     Sync the modules from the _modules directory on the salt master file
     server. This function is environment aware, pass the desired environment
@@ -104,7 +171,7 @@ def sync_modules(env='base'):
     return _sync('modules', env)
 
 
-def sync_states(env='base'):
+def sync_states(env=None):
     '''
     Sync the states from the _states directory on the salt master file
     server. This function is environment aware, pass the desired environment
@@ -118,7 +185,7 @@ def sync_states(env='base'):
     return _sync('states', env)
 
 
-def sync_grains(env='base'):
+def sync_grains(env=None):
     '''
     Sync the grains from the _grains directory on the salt master file
     server. This function is environment aware, pass the desired environment
@@ -132,7 +199,7 @@ def sync_grains(env='base'):
     return _sync('grains', env)
 
 
-def sync_renderers(env='base'):
+def sync_renderers(env=None):
     '''
     Sync the renderers from the _renderers directory on the salt master file
     server. This function is environment aware, pass the desired environment
@@ -146,7 +213,7 @@ def sync_renderers(env='base'):
     return _sync('renderers', env)
 
 
-def sync_returners(env='base'):
+def sync_returners(env=None):
     '''
     Sync the returners from the _returners directory on the salt master file
     server. This function is environment aware, pass the desired environment
@@ -160,7 +227,7 @@ def sync_returners(env='base'):
     return _sync('returners', env)
 
 
-def sync_all(env='base'):
+def sync_all(env=None):
     '''
     Sync down all of the dynamic modules from the file server for a specific
     environment
@@ -169,6 +236,7 @@ def sync_all(env='base'):
 
         salt '*' saltutil.sync_all
     '''
+    logging.debug("Syncing all")
     ret = []
     ret.append(sync_modules(env))
     ret.append(sync_states(env))

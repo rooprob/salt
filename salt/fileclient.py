@@ -12,7 +12,6 @@ import subprocess
 
 # Import third-party libs
 import yaml
-import zmq
 
 # Import salt libs
 from salt.exceptions import MinionError, SaltReqTimeoutError
@@ -97,7 +96,8 @@ class Client(object):
 
     def get_file(self, path, dest='', makedirs=False, env='base'):
         '''
-        Copies a file from the local files or master depending on implementation
+        Copies a file from the local files or master depending on
+        implementation
         '''
         raise NotImplementedError
 
@@ -139,6 +139,11 @@ class Client(object):
         '''
         ret = []
         path = self._check_proto(path)
+        log.info(
+            'Caching directory \'{0}\' for environment \'{1}\''.format(
+                path, env
+            )
+        )
         for fn_ in self.file_list(env):
             if fn_.startswith(path):
                 local = self.cache_file('salt://{0}'.format(fn_), env)
@@ -149,12 +154,12 @@ class Client(object):
         if include_empty:
             # Break up the path into a list containing the bottom-level directory
             # (the one being recursively copied) and the directories preceding it
-            separated = string.rsplit(path,'/',1)
-            if len(separated) != 2:
-                # No slashes in path. (This means all files in env will be copied)
-                prefix = ''
-            else:
-                prefix = separated[0]
+            #separated = string.rsplit(path, '/', 1)
+            #if len(separated) != 2:
+            #    # No slashes in path. (This means all files in env will be copied)
+            #    prefix = ''
+            #else:
+            #    prefix = separated[0]
             for fn_ in self.file_list_emptydirs(env):
                 if fn_.startswith(path):
                     dest = salt.utils.path_join(
@@ -162,7 +167,7 @@ class Client(object):
                         'files',
                         env
                     )
-                    minion_dir = '%s/%s' % (dest,fn_)
+                    minion_dir = '{0}/{1}'.format(dest, fn_)
                     if not os.path.isdir(minion_dir):
                         os.makedirs(minion_dir)
                     ret.append(minion_dir)
@@ -198,6 +203,12 @@ class Client(object):
         '''
         return []
 
+    def dir_list(self, env='base'):
+        '''
+        This function must be overwritten
+        '''
+        return []
+
     def is_cached(self, path, env='base'):
         '''
         Returns the full path to a file if it is cached locally on the minion
@@ -225,9 +236,9 @@ class Client(object):
             if path.endswith('.sls'):
                 # is an sls module!
                 if path.endswith('{0}init.sls'.format(os.sep)):
-                    states.append(path.replace(os.sep, '.')[:-9])
+                    states.append(path.replace('/', '.')[:-9])
                 else:
-                    states.append(path.replace(os.sep, '.')[:-4])
+                    states.append(path.replace('/', '.')[:-4])
         return states
 
     def get_state(self, sls, env):
@@ -267,16 +278,20 @@ class Client(object):
                 # Remove the leading directories from path to derive
                 # the relative path on the minion.
                 minion_relpath = string.lstrip(fn_[len(prefix):], '/')
-                ret.append(self.get_file('salt://{0}'.format(fn_),
-                                         '%s/%s' % (dest, minion_relpath),
-                                         True, env))
+                ret.append(
+                    self.get_file(
+                        'salt://{0}'.format(fn_),
+                        '{0}/{1}'.format(dest, minion_relpath),
+                        True, env
+                    )
+                )
         # Replicate empty dirs from master
         for fn_ in self.file_list_emptydirs(env):
             if fn_.startswith(path):
                 # Remove the leading directories from path to derive
                 # the relative path on the minion.
                 minion_relpath = string.lstrip(fn_[len(prefix):], '/')
-                minion_mkdir = '%s/%s' % (dest, minion_relpath)
+                minion_mkdir = '{0}/{1}'.format(dest, minion_relpath)
                 os.makedirs(minion_mkdir)
                 ret.append(minion_mkdir)
         ret.sort()
@@ -440,6 +455,18 @@ class LocalClient(Client):
                     ret.append(os.path.relpath(root, path))
         return ret
 
+    def dir_list(self, env='base'):
+        '''
+        List the dirs in the file_roots
+        '''
+        ret = []
+        if env not in self.opts['file_roots']:
+            return ret
+        for path in self.opts['file_roots'][env]:
+            for root, dirs, files in os.walk(path, followlinks=True):
+                ret.append(os.path.relpath(root, path))
+        return ret
+
     def hash_file(self, path, env='base'):
         '''
         Return the hash of a file, to get the hash of a file in the file_roots
@@ -451,9 +478,8 @@ class LocalClient(Client):
             path = self._check_proto(path)
         except MinionError:
             if not os.path.isfile(path):
-                err = ('Specified file {0} is not present to generate '
-                        'hash').format(path)
-                log.warning(err)
+                err = 'Specified file {0} is not present to generate hash'
+                log.warning(err.format(path))
                 return ret
             else:
                 with open(path, 'rb') as f:
@@ -533,6 +559,7 @@ class RemoteClient(Client):
         dest is ommited, then the downloaded file will be placed in the minion
         cache
         '''
+        log.info('Fetching file \'{0}\''.format(path))
         path = self._check_proto(path)
         load = {'path': path,
                 'env': env,
@@ -613,6 +640,23 @@ class RemoteClient(Client):
         except SaltReqTimeoutError:
             return ''
 
+    def dir_list(self, env='base'):
+        '''
+        List the dirs on the master
+        '''
+        load = {'env': env,
+                'cmd': '_dir_list'}
+        try:
+            return self.auth.crypticle.loads(
+                    self.sreq.send(
+                        'aes',
+                        self.auth.crypticle.dumps(load),
+                        3,
+                        60)
+                    )
+        except SaltReqTimeoutError:
+            return ''
+
     def hash_file(self, path, env='base'):
         '''
         Return the hash of a file, to get the hash of a file on the salt
@@ -623,9 +667,8 @@ class RemoteClient(Client):
             path = self._check_proto(path)
         except MinionError:
             if not os.path.isfile(path):
-                err = ('Specified file {0} is not present to generate '
-                        'hash').format(path)
-                log.warning(err)
+                err = 'Specified file {0} is not present to generate hash'
+                log.warning(err.format(path))
                 return {}
             else:
                 ret = {}
@@ -686,7 +729,8 @@ class RemoteClient(Client):
         master.
         '''
         load = {'cmd': '_ext_nodes',
-                'id': self.opts['id']}
+                'id': self.opts['id'],
+                'opts': self.opts}
         try:
             return self.auth.crypticle.loads(
                     self.sreq.send(
